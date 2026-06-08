@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Calendar,
+  Copy,
   Download,
   FileImage,
   FolderOpen,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
 import './styles.css';
+import type { PrinterSummary } from '../shared/types';
 
 const defaultWatermark: WatermarkSettings = {
   template: '{date}\n{city}',
@@ -28,12 +30,21 @@ const defaultPrint: PrintSettings = {
   paper: 'a4',
   orientation: 'portrait',
   marginMm: 12,
-  fit: 'contain'
+  fit: 'contain',
+  printerName: '',
+  copies: 1,
+  scalePercent: 100
 };
 
 const defaultGeocode: GeocodeSettings = {
   provider: 'amap',
   apiKey: ''
+};
+
+type SavedWatermarkTemplate = {
+  id: string;
+  name: string;
+  watermark: WatermarkSettings;
 };
 
 function App(): JSX.Element {
@@ -47,6 +58,9 @@ function App(): JSX.Element {
     { id: 'standard:Times Roman', family: 'Times Roman', path: null, source: 'standard' },
     { id: 'standard:Courier', family: 'Courier', path: null, source: 'standard' }
   ]);
+  const [printers, setPrinters] = useState<PrinterSummary[]>([]);
+  const [templates, setTemplates] = useState<SavedWatermarkTemplate[]>(loadWatermarkTemplates);
+  const [templateName, setTemplateName] = useState('默认水印');
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [lastPdf, setLastPdf] = useState<string | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
@@ -65,11 +79,16 @@ function App(): JSX.Element {
 
   useEffect(() => {
     window.photoPrint.listFonts().then(setFonts).catch(() => undefined);
+    refreshPrinters();
   }, []);
 
   useEffect(() => {
     localStorage.setItem('photomark-geocode', JSON.stringify(geocode));
   }, [geocode]);
+
+  useEffect(() => {
+    localStorage.setItem('photomark-watermark-templates', JSON.stringify(templates));
+  }, [templates]);
 
   async function handleImport(): Promise<void> {
     setBusyLabel('正在读取照片信息');
@@ -128,6 +147,52 @@ function App(): JSX.Element {
     } finally {
       setBusyLabel(null);
     }
+  }
+
+  async function refreshPrinters(): Promise<void> {
+    const found = await window.photoPrint.listPrinters();
+    setPrinters(found);
+    const defaultPrinter = found.find((printer) => printer.isDefault);
+    setPrint((current) =>
+      current.printerName || !defaultPrinter ? current : { ...current, printerName: defaultPrinter.name }
+    );
+  }
+
+  async function handleGenerateCalibrationPdf(): Promise<void> {
+    setBusyLabel('正在生成校准页');
+    try {
+      const result = await window.photoPrint.generateCalibrationPdf(print);
+      setLastPdf(result.pdfPath);
+    } finally {
+      setBusyLabel(null);
+    }
+  }
+
+  async function handlePrintCalibration(): Promise<void> {
+    setBusyLabel('正在打印校准页');
+    try {
+      const result = await window.photoPrint.printCalibration(print);
+      setLastPdf(result.pdfPath);
+    } finally {
+      setBusyLabel(null);
+    }
+  }
+
+  function saveTemplate(): void {
+    const name = templateName.trim() || '未命名模板';
+    const id = `template-${Date.now()}`;
+    setTemplates((current) => [...current, { id, name, watermark }]);
+  }
+
+  function applyTemplate(templateId: string): void {
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) return;
+    setWatermark(template.watermark);
+    setTemplateName(template.name);
+  }
+
+  function deleteTemplate(templateId: string): void {
+    setTemplates((current) => current.filter((item) => item.id !== templateId));
   }
 
   return (
@@ -251,6 +316,34 @@ function App(): JSX.Element {
             <Type size={16} />
             水印
           </h2>
+          <div className="template-tools">
+            <label>
+              模板名
+              <input
+                type="text"
+                value={templateName}
+                onChange={(event) => setTemplateName(event.target.value)}
+              />
+            </label>
+            <button className="text-button" onClick={saveTemplate}>
+              <Copy size={15} />
+              保存
+            </button>
+          </div>
+          {templates.length > 0 && (
+            <div className="template-list">
+              {templates.map((template) => (
+                <div className="template-row" key={template.id}>
+                  <button className="link-button" onClick={() => applyTemplate(template.id)}>
+                    {template.name}
+                  </button>
+                  <button className="link-button danger" onClick={() => deleteTemplate(template.id)}>
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <label>
             文本模板
             <textarea
@@ -364,6 +457,38 @@ function App(): JSX.Element {
           </h2>
           <div className="field-grid">
             <label>
+              打印机
+              <select
+                value={print.printerName}
+                onChange={(event) => setPrint({ ...print, printerName: event.target.value })}
+              >
+                <option value="">系统默认</option>
+                {printers.map((printer) => (
+                  <option key={printer.name} value={printer.name}>
+                    {printer.displayName}{printer.isDefault ? ' · 默认' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              份数
+              <input
+                type="number"
+                min="1"
+                max="99"
+                value={print.copies}
+                onChange={(event) => setPrint({ ...print, copies: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+          <div className="button-row">
+            <button className="text-button" onClick={refreshPrinters}>
+              <RefreshCcw size={16} />
+              刷新打印机
+            </button>
+          </div>
+          <div className="field-grid">
+            <label>
               纸张
               <select value={print.paper} onChange={(event) => setPrint({ ...print, paper: event.target.value as PrintSettings['paper'] })}>
                 <option value="a4">A4</option>
@@ -402,6 +527,29 @@ function App(): JSX.Element {
               </select>
             </label>
           </div>
+          <label>
+            尺寸校准 %
+            <input
+              type="range"
+              min="95"
+              max="105"
+              step="0.1"
+              value={print.scalePercent}
+              onChange={(event) => setPrint({ ...print, scalePercent: Number(event.target.value) })}
+            />
+            <span className="hint">{print.scalePercent.toFixed(1)}%</span>
+          </label>
+          <div className="button-row">
+            <button className="text-button" onClick={handleGenerateCalibrationPdf}>
+              <Download size={16} />
+              校准页 PDF
+            </button>
+            <button className="text-button" onClick={handlePrintCalibration}>
+              <Printer size={16} />
+              打印校准页
+            </button>
+          </div>
+          <p className="hint">校准页包含 100mm 方框；量到偏差后调整尺寸校准百分比。</p>
         </section>
 
         <section className="settings-section metadata">
@@ -458,6 +606,15 @@ function loadGeocodeSettings(): GeocodeSettings {
     return saved ? { ...defaultGeocode, ...JSON.parse(saved) } : defaultGeocode;
   } catch {
     return defaultGeocode;
+  }
+}
+
+function loadWatermarkTemplates(): SavedWatermarkTemplate[] {
+  try {
+    const saved = localStorage.getItem('photomark-watermark-templates');
+    return saved ? (JSON.parse(saved) as SavedWatermarkTemplate[]) : [];
+  } catch {
+    return [];
   }
 }
 

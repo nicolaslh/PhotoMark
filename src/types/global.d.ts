@@ -4,6 +4,7 @@ import type {
   GpsPoint,
   FontOption,
   PhotoRecord,
+  PrinterSummary,
   PrintResult,
   PrintSettings,
   WatermarkSettings
@@ -14,6 +15,7 @@ declare global {
     photoPrint: {
       selectPhotos: () => Promise<PhotoRecord[]>;
       listFonts: () => Promise<FontOption[]>;
+      listPrinters: () => Promise<PrinterSummary[]>;
       reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => Promise<GeocodeResult>;
       generatePrintPdf: (
         photos: PhotoRecord[],
@@ -25,6 +27,8 @@ declare global {
         watermark: WatermarkSettings,
         print: PrintSettings
       ) => Promise<PrintResult>;
+      generateCalibrationPdf: (print: PrintSettings) => Promise<PrintResult>;
+      printCalibration: (print: PrintSettings) => Promise<PrintResult>;
       openPath: (path: string) => Promise<void>;
     };
   }

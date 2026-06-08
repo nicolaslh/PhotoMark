@@ -4,6 +4,7 @@ import type { GeocodeSettings, GpsPoint, PhotoRecord, PrintSettings, WatermarkSe
 contextBridge.exposeInMainWorld('photoPrint', {
   selectPhotos: () => ipcRenderer.invoke('photos:select'),
   listFonts: () => ipcRenderer.invoke('fonts:list'),
+  listPrinters: () => ipcRenderer.invoke('printers:list'),
   reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => ipcRenderer.invoke('geo:reverse', { gps, settings }),
   generatePrintPdf: (
     photos: PhotoRecord[],
@@ -12,5 +13,7 @@ contextBridge.exposeInMainWorld('photoPrint', {
   ) => ipcRenderer.invoke('print:generate-pdf', { photos, watermark, print }),
   printPhotos: (photos: PhotoRecord[], watermark: WatermarkSettings, print: PrintSettings) =>
     ipcRenderer.invoke('print:start', { photos, watermark, print }),
+  generateCalibrationPdf: (print: PrintSettings) => ipcRenderer.invoke('print:calibration-pdf', { print }),
+  printCalibration: (print: PrintSettings) => ipcRenderer.invoke('print:calibration-start', { print }),
   openPath: (path: string) => ipcRenderer.invoke('files:open-path', path)
 });

@@ -13,6 +13,7 @@ import type {
   GeocodeResult,
   GpsPoint,
   PhotoRecord,
+  PrinterSummary,
   PrintSettings,
   WatermarkSettings
 } from '../shared/types';
@@ -92,6 +93,8 @@ ipcMain.handle('photos:select', async () => {
 
 ipcMain.handle('fonts:list', async () => listFonts());
 
+ipcMain.handle('printers:list', async () => listPrinters());
+
 ipcMain.handle(
   'geo:reverse',
   async (_event, payload: { gps: GpsPoint; settings: GeocodeSettings }) =>
@@ -116,10 +119,21 @@ ipcMain.handle(
     payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings }
   ) => {
     const pdfPath = await generatePrintPdf(payload.photos, payload.watermark, payload.print);
-    await printPdf(pdfPath);
+    await printPdf(pdfPath, payload.print);
     return { pdfPath };
   }
 );
+
+ipcMain.handle('print:calibration-pdf', async (_event, payload: { print: PrintSettings }) => {
+  const pdfPath = await generateCalibrationPdf(payload.print);
+  return { pdfPath };
+});
+
+ipcMain.handle('print:calibration-start', async (_event, payload: { print: PrintSettings }) => {
+  const pdfPath = await generateCalibrationPdf(payload.print);
+  await printPdf(pdfPath, payload.print);
+  return { pdfPath };
+});
 
 ipcMain.handle('files:open-path', async (_event, filePath: string) => {
   await shell.openPath(filePath);
@@ -402,6 +416,9 @@ async function generatePrintPdf(
       height: page.getHeight() - margin * 2
     };
     const imageSize = fitRect(image.width, image.height, box.width, box.height, print.fit);
+    const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
+    imageSize.width *= scale;
+    imageSize.height *= scale;
     const imageX = box.x + (box.width - imageSize.width) / 2;
     const imageY = box.y + (box.height - imageSize.height) / 2;
 
@@ -448,7 +465,57 @@ async function generatePrintPdf(
   return pdfPath;
 }
 
-async function printPdf(pdfPath: string): Promise<void> {
+async function generateCalibrationPdf(print: PrintSettings): Promise<string> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const paper = PAPER_SIZES[print.paper];
+  const pageSize =
+    print.orientation === 'portrait' ? [paper.width, paper.height] : [paper.height, paper.width];
+  const page = doc.addPage(pageSize as [number, number]);
+  const margin = mmToPt(print.marginMm);
+  const square = mmToPt(100);
+  const x = margin;
+  const y = page.getHeight() - margin - square;
+
+  page.drawText('PhotoMark print calibration', {
+    x: margin,
+    y: page.getHeight() - margin + 6,
+    size: 14,
+    font,
+    color: rgb(0.1, 0.13, 0.16)
+  });
+  page.drawRectangle({
+    x,
+    y,
+    width: square,
+    height: square,
+    borderColor: rgb(0.12, 0.44, 0.44),
+    borderWidth: 1.5
+  });
+  page.drawText('100 mm', {
+    x: x + square / 2 - 18,
+    y: y - 18,
+    size: 11,
+    font,
+    color: rgb(0.3, 0.35, 0.4)
+  });
+  page.drawText('Measure this square. Adjust scale percent if output is not 100 mm.', {
+    x: margin,
+    y: y - 42,
+    size: 10,
+    font,
+    color: rgb(0.3, 0.35, 0.4)
+  });
+
+  const bytes = await doc.save();
+  const dir = path.join(app.getPath('temp'), 'photo-print-assistant');
+  await mkdir(dir, { recursive: true });
+  const pdfPath = path.join(dir, `photomark-calibration-${Date.now()}.pdf`);
+  await writeFile(pdfPath, bytes);
+  return pdfPath;
+}
+
+async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -458,11 +525,18 @@ async function printPdf(pdfPath: string): Promise<void> {
 
   await win.loadURL(pathToFileURL(pdfPath).toString());
   await new Promise<void>((resolve, reject) => {
-    win.webContents.print({ printBackground: true }, (success, failureReason) => {
+    win.webContents.print(
+      {
+        printBackground: true,
+        deviceName: print.printerName || undefined,
+        copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1)))
+      },
+      (success, failureReason) => {
       win.close();
       if (success) resolve();
       else reject(new Error(failureReason || '打印已取消或失败'));
-    });
+      }
+    );
   });
 }
 
@@ -516,6 +590,19 @@ function getSystemFontDirs(): string[] {
     path.join(os.homedir(), '.fonts'),
     path.join(os.homedir(), '.local/share/fonts')
   ];
+}
+
+async function listPrinters(): Promise<PrinterSummary[]> {
+  if (!mainWindow) return [];
+
+  const printers = await mainWindow.webContents.getPrintersAsync();
+  return printers.map((printer) => ({
+    name: printer.name,
+    displayName: printer.displayName || printer.name,
+    description: printer.description || '',
+    status: printer.status,
+    isDefault: Boolean(printer.isDefault)
+  }));
 }
 
 async function scanFontDir(dir: string): Promise<FontOption[]> {
@@ -612,6 +699,10 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 
 function mmToPt(mm: number): number {
   return mm * 2.834645669;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 setInterval(async () => {

@@ -41,6 +41,9 @@ export type PrintSettings = {
   orientation: 'portrait' | 'landscape';
   marginMm: number;
   fit: 'contain' | 'cover';
+  printerName: string;
+  copies: number;
+  scalePercent: number;
 };
 
 export type GeocodeResult = {
@@ -58,6 +61,14 @@ export type FontOption = {
   family: string;
   path: string | null;
   source: 'standard' | 'system';
+};
+
+export type PrinterSummary = {
+  name: string;
+  displayName: string;
+  description: string;
+  status: number;
+  isDefault: boolean;
 };
 
 export type PrintResult = {

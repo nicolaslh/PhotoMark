@@ -423,7 +423,8 @@ label {
 textarea,
 select,
 input[type='number'],
-input[type='password'] {
+input[type='password'],
+input[type='text'] {
   width: 100%;
   min-height: 36px;
   border: 1px solid #d6dce2;
@@ -470,6 +471,57 @@ input[type='range'] {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.template-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.template-list {
+  display: flex;
+  max-height: 116px;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  border: 1px solid #e1e6eb;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fafbfc;
+}
+
+.template-row {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.template-row .link-button {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-button.danger {
+  flex-shrink: 0;
+  color: #b43a3a;
+}
+
+.hint {
+  color: #6c7680;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .metadata p {
