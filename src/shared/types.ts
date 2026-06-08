@@ -71,6 +71,23 @@ export type PrinterSummary = {
   isDefault: boolean;
 };
 
+export type PrintFailure = {
+  photoId: string;
+  fileName: string;
+  message: string;
+};
+
+export type BatchProgressEvent = {
+  jobId: string;
+  index: number;
+  total: number;
+  photoId: string;
+  fileName: string;
+  status: 'pending' | 'processing' | 'done' | 'error' | 'canceled';
+  message?: string;
+};
+
 export type PrintResult = {
   pdfPath: string;
+  failures: PrintFailure[];
 };

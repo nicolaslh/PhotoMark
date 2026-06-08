@@ -47,6 +47,13 @@ type SavedWatermarkTemplate = {
   watermark: WatermarkSettings;
 };
 
+type BatchQueueItem = {
+  photoId: string;
+  fileName: string;
+  status: 'pending' | 'processing' | 'done' | 'error' | 'canceled';
+  message?: string;
+};
+
 function App(): JSX.Element {
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -61,6 +68,8 @@ function App(): JSX.Element {
   const [printers, setPrinters] = useState<PrinterSummary[]>([]);
   const [templates, setTemplates] = useState<SavedWatermarkTemplate[]>(loadWatermarkTemplates);
   const [templateName, setTemplateName] = useState('默认水印');
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [queue, setQueue] = useState<BatchQueueItem[]>([]);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [lastPdf, setLastPdf] = useState<string | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
@@ -80,6 +89,15 @@ function App(): JSX.Element {
   useEffect(() => {
     window.photoPrint.listFonts().then(setFonts).catch(() => undefined);
     refreshPrinters();
+    return window.photoPrint.onBatchProgress((event) => {
+      setQueue((current) =>
+        current.map((item) =>
+          item.photoId === event.photoId
+            ? { ...item, status: event.status, message: event.message }
+            : item
+        )
+      );
+    });
   }, []);
 
   useEffect(() => {
@@ -128,25 +146,55 @@ function App(): JSX.Element {
   }
 
   async function handleGeneratePdf(): Promise<void> {
-    if (photos.length === 0) return;
-    setBusyLabel('正在生成打印 PDF');
-    try {
-      const result = await window.photoPrint.generatePrintPdf(photos, watermark, print);
-      setLastPdf(result.pdfPath);
-    } finally {
-      setBusyLabel(null);
-    }
+    await startBatch('pdf');
   }
 
   async function handlePrint(): Promise<void> {
+    await startBatch('print');
+  }
+
+  async function startBatch(mode: 'pdf' | 'print'): Promise<void> {
     if (photos.length === 0) return;
-    setBusyLabel('正在准备系统打印');
+    const jobId = `job-${Date.now()}`;
+    setCurrentJobId(jobId);
+    setQueue(
+      photos.map((photo) => ({
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'pending'
+      }))
+    );
+    setBusyLabel(mode === 'pdf' ? '正在生成打印 PDF' : '正在准备系统打印');
+
     try {
-      const result = await window.photoPrint.printPhotos(photos, watermark, print);
+      const result =
+        mode === 'pdf'
+          ? await window.photoPrint.generatePrintPdf(photos, watermark, print, jobId)
+          : await window.photoPrint.printPhotos(photos, watermark, print, jobId);
       setLastPdf(result.pdfPath);
+      if (result.failures.length > 0) {
+        setBusyLabel(`完成，${result.failures.length} 张照片失败`);
+        return;
+      }
+      setBusyLabel('批量任务完成');
+    } catch (error) {
+      setBusyLabel(error instanceof Error ? error.message : '批量任务失败');
     } finally {
-      setBusyLabel(null);
+      setCurrentJobId(null);
     }
+  }
+
+  async function cancelCurrentJob(): Promise<void> {
+    if (!currentJobId) return;
+    await window.photoPrint.cancelBatch(currentJobId);
+    setQueue((current) =>
+      current.map((item) =>
+        item.status === 'pending' || item.status === 'processing'
+          ? { ...item, status: 'canceled', message: '任务已取消' }
+          : item
+      )
+    );
+    setBusyLabel('正在取消任务');
   }
 
   async function refreshPrinters(): Promise<void> {
@@ -233,7 +281,36 @@ function App(): JSX.Element {
           )}
         </div>
 
+        {queue.length > 0 && (
+          <div className="queue-panel">
+            <div className="queue-header">
+              <strong>批量任务</strong>
+              <span>{queue.filter((item) => item.status === 'done').length}/{queue.length}</span>
+            </div>
+            <div className="queue-bar">
+              <span
+                style={{
+                  width: `${Math.round((queue.filter((item) => item.status === 'done').length / queue.length) * 100)}%`
+                }}
+              />
+            </div>
+            <div className="queue-list">
+              {queue.slice(0, 8).map((item) => (
+                <div className={`queue-item ${item.status}`} key={item.photoId}>
+                  <span>{item.fileName}</span>
+                  <small>{formatQueueStatus(item)}</small>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="rail-actions">
+          {currentJobId && (
+            <button className="text-button danger" onClick={cancelCurrentJob}>
+              取消当前批次
+            </button>
+          )}
           <button className="text-button" disabled={photos.length === 0} onClick={() => resolveLocations()}>
             <RefreshCcw size={16} />
             重新解析地址
@@ -248,11 +325,11 @@ function App(): JSX.Element {
             <strong>{selectedPhoto?.fileName ?? '未选择照片'}</strong>
           </div>
           <div className="toolbar-actions">
-            <button className="text-button" disabled={photos.length === 0} onClick={handleGeneratePdf}>
+            <button className="text-button" disabled={photos.length === 0 || Boolean(currentJobId)} onClick={handleGeneratePdf}>
               <Download size={16} />
               生成 PDF
             </button>
-            <button className="text-button primary" disabled={photos.length === 0} onClick={handlePrint}>
+            <button className="text-button primary" disabled={photos.length === 0 || Boolean(currentJobId)} onClick={handlePrint}>
               <Printer size={16} />
               打印
             </button>
@@ -616,6 +693,14 @@ function loadWatermarkTemplates(): SavedWatermarkTemplate[] {
   } catch {
     return [];
   }
+}
+
+function formatQueueStatus(item: BatchQueueItem): string {
+  if (item.status === 'processing') return '处理中';
+  if (item.status === 'done') return '完成';
+  if (item.status === 'error') return item.message ? `失败：${item.message}` : '失败';
+  if (item.status === 'canceled') return '已取消';
+  return '等待';
 }
 
 createRoot(document.getElementById('root')!).render(

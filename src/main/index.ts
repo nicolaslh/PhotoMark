@@ -8,13 +8,16 @@ import { pathToFileURL } from 'node:url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import sharp from 'sharp';
 import type {
+  BatchProgressEvent,
   FontOption,
   GeocodeSettings,
   GeocodeResult,
   GpsPoint,
   PhotoRecord,
+  PrintFailure,
   PrinterSummary,
   PrintSettings,
+  PrintResult,
   WatermarkSettings
 } from '../shared/types';
 
@@ -35,6 +38,7 @@ const PAPER_SIZES = {
 
 let mainWindow: BrowserWindow | null = null;
 let geocodeCache: Record<string, GeocodeResult> = {};
+const canceledJobs = new Set<string>();
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -104,35 +108,58 @@ ipcMain.handle(
 ipcMain.handle(
   'print:generate-pdf',
   async (
-    _event,
-    payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings }
+    event,
+    payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
-    const pdfPath = await generatePrintPdf(payload.photos, payload.watermark, payload.print);
-    return { pdfPath };
+    try {
+      return await generatePrintPdf(
+        payload.photos,
+        payload.watermark,
+        payload.print,
+        payload.jobId,
+        (progress) => event.sender.send('batch:progress', progress)
+      );
+    } finally {
+      canceledJobs.delete(payload.jobId);
+    }
   }
 );
 
 ipcMain.handle(
   'print:start',
   async (
-    _event,
-    payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings }
+    event,
+    payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
-    const pdfPath = await generatePrintPdf(payload.photos, payload.watermark, payload.print);
-    await printPdf(pdfPath, payload.print);
-    return { pdfPath };
+    try {
+      const result = await generatePrintPdf(
+        payload.photos,
+        payload.watermark,
+        payload.print,
+        payload.jobId,
+        (progress) => event.sender.send('batch:progress', progress)
+      );
+      await printPdf(result.pdfPath, payload.print);
+      return result;
+    } finally {
+      canceledJobs.delete(payload.jobId);
+    }
   }
 );
 
+ipcMain.handle('batch:cancel', async (_event, payload: { jobId: string }) => {
+  canceledJobs.add(payload.jobId);
+});
+
 ipcMain.handle('print:calibration-pdf', async (_event, payload: { print: PrintSettings }) => {
   const pdfPath = await generateCalibrationPdf(payload.print);
-  return { pdfPath };
+  return { pdfPath, failures: [] };
 });
 
 ipcMain.handle('print:calibration-start', async (_event, payload: { print: PrintSettings }) => {
   const pdfPath = await generateCalibrationPdf(payload.print);
   await printPdf(pdfPath, payload.print);
-  return { pdfPath };
+  return { pdfPath, failures: [] };
 });
 
 ipcMain.handle('files:open-path', async (_event, filePath: string) => {
@@ -394,8 +421,10 @@ async function reverseGeocodeOsm(gps: GpsPoint): Promise<GeocodeResult> {
 async function generatePrintPdf(
   photos: PhotoRecord[],
   watermark: WatermarkSettings,
-  print: PrintSettings
-): Promise<string> {
+  print: PrintSettings,
+  jobId: string,
+  onProgress?: (event: BatchProgressEvent) => void
+): Promise<PrintResult> {
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
   const font = await embedWatermarkFont(doc, watermark);
@@ -404,57 +433,112 @@ async function generatePrintPdf(
     print.orientation === 'portrait' ? [paper.width, paper.height] : [paper.height, paper.width];
   const margin = mmToPt(print.marginMm);
   const color = hexToRgb(watermark.color);
+  const failures: PrintFailure[] = [];
 
-  for (const photo of photos) {
-    const page = doc.addPage(pageSize as [number, number]);
-    const imageBuffer = await createJpegBuffer(photo.path);
-    const image = await doc.embedJpg(imageBuffer);
-    const box = {
-      x: margin,
-      y: margin,
-      width: page.getWidth() - margin * 2,
-      height: page.getHeight() - margin * 2
-    };
-    const imageSize = fitRect(image.width, image.height, box.width, box.height, print.fit);
-    const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
-    imageSize.width *= scale;
-    imageSize.height *= scale;
-    const imageX = box.x + (box.width - imageSize.width) / 2;
-    const imageY = box.y + (box.height - imageSize.height) / 2;
+  for (let index = 0; index < photos.length; index += 1) {
+    const photo = photos[index];
+    if (canceledJobs.has(jobId)) {
+      onProgress?.({
+        jobId,
+        index,
+        total: photos.length,
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'canceled',
+        message: '任务已取消'
+      });
+      break;
+    }
 
-    page.drawImage(image, {
-      x: imageX,
-      y: imageY,
-      width: imageSize.width,
-      height: imageSize.height
+    onProgress?.({
+      jobId,
+      index,
+      total: photos.length,
+      photoId: photo.id,
+      fileName: photo.fileName,
+      status: 'processing'
     });
 
-    const text = renderWatermarkText(watermark.template, photo);
-    if (text.trim()) {
-      const lines = text.split('\n');
-      const lineHeight = watermark.fontSize * 1.22;
-      const maxLineWidth = Math.max(...lines.map((line) => font.widthOfTextAtSize(line, watermark.fontSize)));
-      const textHeight = lineHeight * lines.length;
-      const textPoint = getWatermarkPoint(
-        watermark.position,
-        page.getWidth(),
-        page.getHeight(),
-        maxLineWidth,
-        textHeight,
-        mmToPt(watermark.marginMm)
-      );
+    try {
+      const page = doc.addPage(pageSize as [number, number]);
+      const imageBuffer = await createJpegBuffer(photo.path);
+      const image = await doc.embedJpg(imageBuffer);
+      const box = {
+        x: margin,
+        y: margin,
+        width: page.getWidth() - margin * 2,
+        height: page.getHeight() - margin * 2
+      };
+      const imageSize = fitRect(image.width, image.height, box.width, box.height, print.fit);
+      const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
+      imageSize.width *= scale;
+      imageSize.height *= scale;
+      const imageX = box.x + (box.width - imageSize.width) / 2;
+      const imageY = box.y + (box.height - imageSize.height) / 2;
 
-      lines.forEach((line, index) => {
-        page.drawText(line, {
-          x: textPoint.x,
-          y: textPoint.y + textHeight - lineHeight * (index + 1),
-          size: watermark.fontSize,
-          font,
-          color: rgb(color.r, color.g, color.b),
-          opacity: watermark.opacity
+      page.drawImage(image, {
+        x: imageX,
+        y: imageY,
+        width: imageSize.width,
+        height: imageSize.height
+      });
+
+      const text = renderWatermarkText(watermark.template, photo);
+      if (text.trim()) {
+        const lines = text.split('\n');
+        const lineHeight = watermark.fontSize * 1.22;
+        const maxLineWidth = Math.max(...lines.map((line) => font.widthOfTextAtSize(line, watermark.fontSize)));
+        const textHeight = lineHeight * lines.length;
+        const textPoint = getWatermarkPoint(
+          watermark.position,
+          page.getWidth(),
+          page.getHeight(),
+          maxLineWidth,
+          textHeight,
+          mmToPt(watermark.marginMm)
+        );
+
+        lines.forEach((line, lineIndex) => {
+          page.drawText(line, {
+            x: textPoint.x,
+            y: textPoint.y + textHeight - lineHeight * (lineIndex + 1),
+            size: watermark.fontSize,
+            font,
+            color: rgb(color.r, color.g, color.b),
+            opacity: watermark.opacity
+          });
         });
+      }
+
+      onProgress?.({
+        jobId,
+        index,
+        total: photos.length,
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'done'
+      });
+    } catch (error) {
+      if (doc.getPageCount() > 0) {
+        doc.removePage(doc.getPageCount() - 1);
+      }
+
+      const message = error instanceof Error ? error.message : '处理失败';
+      failures.push({ photoId: photo.id, fileName: photo.fileName, message });
+      onProgress?.({
+        jobId,
+        index,
+        total: photos.length,
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'error',
+        message
       });
     }
+  }
+
+  if (doc.getPageCount() === 0) {
+    throw new Error(failures[0]?.message || '没有可打印的照片');
   }
 
   const bytes = await doc.save();
@@ -462,7 +546,7 @@ async function generatePrintPdf(
   await mkdir(dir, { recursive: true });
   const pdfPath = path.join(dir, `photo-print-${Date.now()}.pdf`);
   await writeFile(pdfPath, bytes);
-  return pdfPath;
+  return { pdfPath, failures };
 }
 
 async function generateCalibrationPdf(print: PrintSettings): Promise<string> {

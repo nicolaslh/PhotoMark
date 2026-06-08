@@ -1,4 +1,5 @@
 import type {
+  BatchProgressEvent,
   GeocodeResult,
   GeocodeSettings,
   GpsPoint,
@@ -20,13 +21,17 @@ declare global {
       generatePrintPdf: (
         photos: PhotoRecord[],
         watermark: WatermarkSettings,
-        print: PrintSettings
+        print: PrintSettings,
+        jobId: string
       ) => Promise<PrintResult>;
       printPhotos: (
         photos: PhotoRecord[],
         watermark: WatermarkSettings,
-        print: PrintSettings
+        print: PrintSettings,
+        jobId: string
       ) => Promise<PrintResult>;
+      cancelBatch: (jobId: string) => Promise<void>;
+      onBatchProgress: (callback: (event: BatchProgressEvent) => void) => () => void;
       generateCalibrationPdf: (print: PrintSettings) => Promise<PrintResult>;
       printCalibration: (print: PrintSettings) => Promise<PrintResult>;
       openPath: (path: string) => Promise<void>;

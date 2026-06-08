@@ -233,6 +233,101 @@ h2 {
   width: 100%;
 }
 
+.rail-actions .text-button + .text-button {
+  margin-top: 8px;
+}
+
+.text-button.danger {
+  border-color: #e8c8c8;
+  color: #a02f2f;
+  background: #fff7f7;
+}
+
+.queue-panel {
+  border-top: 1px solid #e9edf1;
+  padding: 12px;
+  background: #fbfcfd;
+}
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #27313a;
+  font-size: 13px;
+}
+
+.queue-header span {
+  color: #66717a;
+  font-weight: 740;
+}
+
+.queue-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  margin: 9px 0 10px;
+  background: #e8edf1;
+}
+
+.queue-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1d6f6f;
+  transition: width 160ms ease;
+}
+
+.queue-list {
+  display: flex;
+  max-height: 170px;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.queue-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-radius: 7px;
+  padding: 6px 7px;
+  background: #ffffff;
+}
+
+.queue-item span,
+.queue-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-item span {
+  color: #25313a;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.queue-item small {
+  color: #68737d;
+  font-size: 11px;
+}
+
+.queue-item.processing {
+  background: #edf7f5;
+}
+
+.queue-item.done small {
+  color: #247257;
+}
+
+.queue-item.error small,
+.queue-item.canceled small {
+  color: #a23b3b;
+}
+
 .preview-pane {
   display: grid;
   min-width: 0;
