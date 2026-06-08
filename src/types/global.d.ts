@@ -15,6 +15,7 @@ declare global {
   interface Window {
     photoPrint: {
       selectPhotos: () => Promise<PhotoRecord[]>;
+      selectPhotoFolder: () => Promise<PhotoRecord[]>;
       listFonts: () => Promise<FontOption[]>;
       listPrinters: () => Promise<PrinterSummary[]>;
       reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => Promise<GeocodeResult>;

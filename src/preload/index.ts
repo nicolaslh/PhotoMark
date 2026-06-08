@@ -10,6 +10,7 @@ import type {
 
 contextBridge.exposeInMainWorld('photoPrint', {
   selectPhotos: () => ipcRenderer.invoke('photos:select'),
+  selectPhotoFolder: () => ipcRenderer.invoke('photos:select-folder'),
   listFonts: () => ipcRenderer.invoke('fonts:list'),
   listPrinters: () => ipcRenderer.invoke('printers:list'),
   reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => ipcRenderer.invoke('geo:reverse', { gps, settings }),

@@ -24,6 +24,7 @@ import type {
 const IMAGE_FILTERS = [
   { name: 'Photos', extensions: ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp', 'tif', 'tiff'] }
 ];
+const IMAGE_EXTENSIONS = new Set(IMAGE_FILTERS[0].extensions);
 
 const STANDARD_FONTS: FontOption[] = [
   { id: 'standard:Helvetica', family: 'Helvetica', path: null, source: 'standard' },
@@ -34,6 +35,11 @@ const STANDARD_FONTS: FontOption[] = [
 const PAPER_SIZES = {
   a4: { width: 595.28, height: 841.89 },
   letter: { width: 612, height: 792 }
+};
+const PHOTO_SIZES_MM = {
+  '4r': { width: 101.6, height: 152.4 },
+  '5r': { width: 127, height: 177.8 },
+  '6r': { width: 152.4, height: 203.2 }
 };
 
 let mainWindow: BrowserWindow | null = null;
@@ -92,6 +98,21 @@ ipcMain.handle('photos:select', async () => {
   if (result.canceled) return [];
 
   const photos = await Promise.all(result.filePaths.map((filePath) => inspectPhoto(filePath)));
+  return photos;
+});
+
+ipcMain.handle('photos:select-folder', async () => {
+  if (!mainWindow) return [];
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择照片文件夹',
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || result.filePaths.length === 0) return [];
+
+  const filePaths = await collectImageFiles(result.filePaths[0]);
+  const photos = await Promise.all(filePaths.map((filePath) => inspectPhoto(filePath)));
   return photos;
 });
 
@@ -209,6 +230,21 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
       error: message
     };
   }
+}
+
+async function collectImageFiles(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) return collectImageFiles(fullPath);
+      if (!entry.isFile()) return [];
+      const ext = path.extname(entry.name).replace('.', '').toLowerCase();
+      return IMAGE_EXTENSIONS.has(ext) ? [fullPath] : [];
+    })
+  );
+
+  return nested.flat().sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
 }
 
 function pickCapturedDate(tags: Record<string, unknown>, fallback: Date): { value: string; source: string } {
@@ -463,12 +499,7 @@ async function generatePrintPdf(
       const page = doc.addPage(pageSize as [number, number]);
       const imageBuffer = await createJpegBuffer(photo.path);
       const image = await doc.embedJpg(imageBuffer);
-      const box = {
-        x: margin,
-        y: margin,
-        width: page.getWidth() - margin * 2,
-        height: page.getHeight() - margin * 2
-      };
+      const box = getPhotoPrintBox(page.getWidth(), page.getHeight(), margin, print, image.width >= image.height);
       const imageSize = fitRect(image.width, image.height, box.width, box.height, print.fit);
       const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
       imageSize.width *= scale;
@@ -732,6 +763,59 @@ function fitRect(
     width: sourceWidth * scale,
     height: sourceHeight * scale
   };
+}
+
+function getPhotoPrintBox(
+  pageWidth: number,
+  pageHeight: number,
+  margin: number,
+  print: PrintSettings,
+  isLandscapePhoto: boolean
+): { x: number; y: number; width: number; height: number } {
+  const maxBox = {
+    x: margin,
+    y: margin,
+    width: pageWidth - margin * 2,
+    height: pageHeight - margin * 2
+  };
+
+  if (print.photoSize === 'fit-page') return maxBox;
+
+  const photoSize = getPhotoSizeMm(print);
+  let width = mmToPt(photoSize.width);
+  let height = mmToPt(photoSize.height);
+
+  if (isLandscapePhoto && height > width) {
+    [width, height] = [height, width];
+  }
+
+  if (!isLandscapePhoto && width > height) {
+    [width, height] = [height, width];
+  }
+
+  const scale = Math.min(1, maxBox.width / width, maxBox.height / height);
+  width *= scale;
+  height *= scale;
+
+  return {
+    x: margin + (maxBox.width - width) / 2,
+    y: margin + (maxBox.height - height) / 2,
+    width,
+    height
+  };
+}
+
+function getPhotoSizeMm(print: PrintSettings): { width: number; height: number } {
+  if (print.photoSize === 'custom') {
+    return {
+      width: clamp(print.customPhotoWidthMm || 100, 20, 1000),
+      height: clamp(print.customPhotoHeightMm || 150, 20, 1000)
+    };
+  }
+
+  if (print.photoSize === '5r') return PHOTO_SIZES_MM['5r'];
+  if (print.photoSize === '6r') return PHOTO_SIZES_MM['6r'];
+  return PHOTO_SIZES_MM['4r'];
 }
 
 function getWatermarkPoint(

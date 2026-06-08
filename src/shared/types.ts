@@ -41,6 +41,9 @@ export type PrintSettings = {
   orientation: 'portrait' | 'landscape';
   marginMm: number;
   fit: 'contain' | 'cover';
+  photoSize: 'fit-page' | '4r' | '5r' | '6r' | 'custom';
+  customPhotoWidthMm: number;
+  customPhotoHeightMm: number;
   printerName: string;
   copies: number;
   scalePercent: number;

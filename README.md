@@ -5,11 +5,13 @@ Electron MVP for photo printing with temporary date/location watermarks.
 ## 当前能力
 
 - 导入 JPG、PNG、WEBP、TIFF、HEIC/HEIF 照片。
+- 支持选择单张/多张照片，也支持递归导入整个照片文件夹。
 - 读取 EXIF 拍摄时间，失败时回退到文件创建时间。
 - 读取 EXIF GPS 经纬度。
 - 联网逆地理编码，将经纬度转换为城市信息，默认使用高德地图 Web 服务，另有 OpenStreetMap 备用。
 - 水印只在预览、临时 PDF、打印阶段叠加，不修改原图。
 - 纸张级打印预览，按纸张、方向、边距和适配方式展示。
+- 支持照片打印尺寸：适应可打印区域、4R、5R、6R、自定义毫米尺寸。
 - 读取系统打印机列表，支持选择目标打印机和打印份数。
 - 支持 100mm 打印校准页，并可通过尺寸校准百分比修正输出偏差。
 - 支持批量生成打印 PDF。

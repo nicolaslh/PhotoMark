@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   FileImage,
+  FolderInput,
   FolderOpen,
   MapPin,
   Printer,
@@ -31,6 +32,9 @@ const defaultPrint: PrintSettings = {
   orientation: 'portrait',
   marginMm: 12,
   fit: 'contain',
+  photoSize: 'fit-page',
+  customPhotoWidthMm: 101.6,
+  customPhotoHeightMm: 152.4,
   printerName: '',
   copies: 1,
   scalePercent: 100
@@ -81,6 +85,10 @@ function App(): JSX.Element {
   );
 
   const paperSize = useMemo(() => getPaperSize(print), [print]);
+  const photoAreaStyle = useMemo(
+    () => getPhotoAreaStyle(print, selectedPhoto),
+    [print, selectedPhoto]
+  );
 
   useEffect(() => {
     if (!selectedId && photos.length > 0) setSelectedId(photos[0].id);
@@ -112,13 +120,27 @@ function App(): JSX.Element {
     setBusyLabel('正在读取照片信息');
     try {
       const imported = await window.photoPrint.selectPhotos();
-      if (imported.length === 0) return;
-      setPhotos((current) => mergePhotos(current, imported));
-      setSelectedId(imported[0].id);
-      resolveLocations(imported);
+      acceptImportedPhotos(imported);
     } finally {
       setBusyLabel(null);
     }
+  }
+
+  async function handleImportFolder(): Promise<void> {
+    setBusyLabel('正在扫描照片文件夹');
+    try {
+      const imported = await window.photoPrint.selectPhotoFolder();
+      acceptImportedPhotos(imported);
+    } finally {
+      setBusyLabel(null);
+    }
+  }
+
+  function acceptImportedPhotos(imported: PhotoRecord[]): void {
+    if (imported.length === 0) return;
+    setPhotos((current) => mergePhotos(current, imported));
+    setSelectedId(imported[0].id);
+    resolveLocations(imported);
   }
 
   async function resolveLocations(targetPhotos = photos): Promise<void> {
@@ -251,9 +273,14 @@ function App(): JSX.Element {
             <p className="eyebrow">Photo Print</p>
             <h1>照片打印助手</h1>
           </div>
-          <button className="icon-button primary" title="导入照片" onClick={handleImport}>
-            <FolderOpen size={18} />
-          </button>
+          <div className="rail-header-actions">
+            <button className="icon-button" title="导入文件夹" onClick={handleImportFolder}>
+              <FolderInput size={18} />
+            </button>
+            <button className="icon-button primary" title="导入照片" onClick={handleImport}>
+              <FolderOpen size={18} />
+            </button>
+          </div>
         </div>
 
         <div className="photo-list">
@@ -345,7 +372,7 @@ function App(): JSX.Element {
                 padding: `${Math.max(10, print.marginMm * 1.35)}px`
               }}
             >
-              <div className="print-image-area">
+              <div className="print-image-area" style={photoAreaStyle}>
                 <img
                   src={selectedPhoto.previewDataUrl}
                   alt={selectedPhoto.fileName}
@@ -585,6 +612,45 @@ function App(): JSX.Element {
               </select>
             </label>
           </div>
+          <label>
+            照片尺寸
+            <select
+              value={print.photoSize}
+              onChange={(event) => setPrint({ ...print, photoSize: event.target.value as PrintSettings['photoSize'] })}
+            >
+              <option value="fit-page">适应可打印区域</option>
+              <option value="4r">4R · 4 x 6 in</option>
+              <option value="5r">5R · 5 x 7 in</option>
+              <option value="6r">6R · 6 x 8 in</option>
+              <option value="custom">自定义尺寸</option>
+            </select>
+          </label>
+          {print.photoSize === 'custom' && (
+            <div className="field-grid">
+              <label>
+                宽 mm
+                <input
+                  type="number"
+                  min="20"
+                  max="1000"
+                  step="0.1"
+                  value={print.customPhotoWidthMm}
+                  onChange={(event) => setPrint({ ...print, customPhotoWidthMm: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                高 mm
+                <input
+                  type="number"
+                  min="20"
+                  max="1000"
+                  step="0.1"
+                  value={print.customPhotoHeightMm}
+                  onChange={(event) => setPrint({ ...print, customPhotoHeightMm: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+          )}
           <div className="field-grid">
             <label>
               页边距 mm
@@ -675,6 +741,41 @@ function formatDate(value: string): string {
 function getPaperSize(print: PrintSettings): { width: number; height: number } {
   const base = print.paper === 'letter' ? { width: 612, height: 792 } : { width: 595, height: 842 };
   return print.orientation === 'portrait' ? base : { width: base.height, height: base.width };
+}
+
+function getPhotoAreaStyle(print: PrintSettings, photo: PhotoRecord | null): React.CSSProperties {
+  if (print.photoSize === 'fit-page') {
+    return { width: '100%', height: '100%' };
+  }
+
+  const paperMm = getPaperSizeMm(print);
+  const size = getPhotoSizeMm(print);
+  const isLandscape = photo?.previewDataUrl ? false : false;
+  let width = size.width;
+  let height = size.height;
+
+  if (isLandscape && height > width) {
+    [width, height] = [height, width];
+  }
+
+  return {
+    width: `${Math.min(100, (width / paperMm.width) * 100)}%`,
+    height: `${Math.min(100, (height / paperMm.height) * 100)}%`
+  };
+}
+
+function getPaperSizeMm(print: PrintSettings): { width: number; height: number } {
+  const base = print.paper === 'letter' ? { width: 215.9, height: 279.4 } : { width: 210, height: 297 };
+  return print.orientation === 'portrait' ? base : { width: base.height, height: base.width };
+}
+
+function getPhotoSizeMm(print: PrintSettings): { width: number; height: number } {
+  if (print.photoSize === '5r') return { width: 127, height: 177.8 };
+  if (print.photoSize === '6r') return { width: 152.4, height: 203.2 };
+  if (print.photoSize === 'custom') {
+    return { width: print.customPhotoWidthMm, height: print.customPhotoHeightMm };
+  }
+  return { width: 101.6, height: 152.4 };
 }
 
 function loadGeocodeSettings(): GeocodeSettings {

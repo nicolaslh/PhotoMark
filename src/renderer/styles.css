@@ -63,6 +63,12 @@ button {
   padding: 22px 18px 18px;
 }
 
+.rail-header-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
 .eyebrow {
   margin: 0 0 3px;
   color: #68727d;
@@ -385,6 +391,8 @@ h2 {
   display: flex;
   width: min(100%, 760px);
   max-height: 100%;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   border: 1px solid #dce1e6;
   border-radius: 8px;
