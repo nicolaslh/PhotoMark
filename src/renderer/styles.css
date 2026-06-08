@@ -285,10 +285,10 @@ h2 {
   padding: 28px;
 }
 
-.photo-preview {
+.paper-preview {
   position: relative;
   display: flex;
-  max-width: min(100%, 980px);
+  width: min(100%, 760px);
   max-height: 100%;
   overflow: hidden;
   border: 1px solid #dce1e6;
@@ -297,11 +297,33 @@ h2 {
   box-shadow: 0 18px 50px rgba(37, 46, 55, 0.16);
 }
 
-.photo-preview img {
+.print-image-area {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px dashed #cdd5dc;
+  background:
+    linear-gradient(45deg, #f4f6f8 25%, transparent 25%),
+    linear-gradient(-45deg, #f4f6f8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #f4f6f8 75%),
+    linear-gradient(-45deg, transparent 75%, #f4f6f8 75%);
+  background-color: #ffffff;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+}
+
+.print-image-area img {
   display: block;
-  max-width: 100%;
-  max-height: calc(100vh - 170px);
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
 }
 
 .watermark {
@@ -317,6 +339,16 @@ h2 {
   overflow-wrap: anywhere;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
   white-space: pre-wrap;
+}
+
+.paper-label {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  color: #77828c;
+  font-size: 11px;
+  font-weight: 760;
+  pointer-events: none;
 }
 
 .watermark-top-left {
@@ -390,7 +422,8 @@ label {
 
 textarea,
 select,
-input[type='number'] {
+input[type='number'],
+input[type='password'] {
   width: 100%;
   min-height: 36px;
   border: 1px solid #d6dce2;

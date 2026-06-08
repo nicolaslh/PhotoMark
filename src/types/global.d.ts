@@ -1,6 +1,8 @@
 import type {
   GeocodeResult,
+  GeocodeSettings,
   GpsPoint,
+  FontOption,
   PhotoRecord,
   PrintResult,
   PrintSettings,
@@ -11,7 +13,8 @@ declare global {
   interface Window {
     photoPrint: {
       selectPhotos: () => Promise<PhotoRecord[]>;
-      reverseGeocode: (gps: GpsPoint) => Promise<GeocodeResult>;
+      listFonts: () => Promise<FontOption[]>;
+      reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => Promise<GeocodeResult>;
       generatePrintPdf: (
         photos: PhotoRecord[],
         watermark: WatermarkSettings,

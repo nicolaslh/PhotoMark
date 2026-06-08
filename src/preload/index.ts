@@ -1,9 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { GpsPoint, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
+import type { GeocodeSettings, GpsPoint, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
 
 contextBridge.exposeInMainWorld('photoPrint', {
   selectPhotos: () => ipcRenderer.invoke('photos:select'),
-  reverseGeocode: (gps: GpsPoint) => ipcRenderer.invoke('geo:reverse', gps),
+  listFonts: () => ipcRenderer.invoke('fonts:list'),
+  reverseGeocode: (gps: GpsPoint, settings: GeocodeSettings) => ipcRenderer.invoke('geo:reverse', { gps, settings }),
   generatePrintPdf: (
     photos: PhotoRecord[],
     watermark: WatermarkSettings,

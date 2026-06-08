@@ -27,7 +27,8 @@ export type WatermarkPosition =
 
 export type WatermarkSettings = {
   template: string;
-  fontFamily: 'Helvetica' | 'Times Roman' | 'Courier';
+  fontFamily: string;
+  fontPath: string | null;
   fontSize: number;
   color: string;
   opacity: number;
@@ -45,6 +46,18 @@ export type PrintSettings = {
 export type GeocodeResult = {
   city: string | null;
   address: string | null;
+};
+
+export type GeocodeSettings = {
+  provider: 'amap' | 'osm';
+  apiKey: string;
+};
+
+export type FontOption = {
+  id: string;
+  family: string;
+  path: string | null;
+  source: 'standard' | 'system';
 };
 
 export type PrintResult = {

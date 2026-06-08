@@ -10,12 +10,13 @@ import {
   RefreshCcw,
   Type
 } from 'lucide-react';
-import type { PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
+import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
 import './styles.css';
 
 const defaultWatermark: WatermarkSettings = {
   template: '{date}\n{city}',
   fontFamily: 'Helvetica',
+  fontPath: null,
   fontSize: 18,
   color: '#ffffff',
   opacity: 0.92,
@@ -30,23 +31,45 @@ const defaultPrint: PrintSettings = {
   fit: 'contain'
 };
 
+const defaultGeocode: GeocodeSettings = {
+  provider: 'amap',
+  apiKey: ''
+};
+
 function App(): JSX.Element {
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [watermark, setWatermark] = useState(defaultWatermark);
   const [print, setPrint] = useState(defaultPrint);
+  const [geocode, setGeocode] = useState<GeocodeSettings>(loadGeocodeSettings);
+  const [fonts, setFonts] = useState<FontOption[]>([
+    { id: 'standard:Helvetica', family: 'Helvetica', path: null, source: 'standard' },
+    { id: 'standard:Times Roman', family: 'Times Roman', path: null, source: 'standard' },
+    { id: 'standard:Courier', family: 'Courier', path: null, source: 'standard' }
+  ]);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [lastPdf, setLastPdf] = useState<string | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
+  const selectedFontId = watermark.fontPath ? `system:${watermark.fontPath}` : `standard:${watermark.fontFamily}`;
 
   const watermarkText = useMemo(
     () => (selectedPhoto ? renderWatermarkText(watermark.template, selectedPhoto) : ''),
     [selectedPhoto, watermark.template]
   );
 
+  const paperSize = useMemo(() => getPaperSize(print), [print]);
+
   useEffect(() => {
     if (!selectedId && photos.length > 0) setSelectedId(photos[0].id);
   }, [photos, selectedId]);
+
+  useEffect(() => {
+    window.photoPrint.listFonts().then(setFonts).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('photomark-geocode', JSON.stringify(geocode));
+  }, [geocode]);
 
   async function handleImport(): Promise<void> {
     setBusyLabel('正在读取照片信息');
@@ -68,7 +91,7 @@ function App(): JSX.Element {
     setBusyLabel('正在解析城市信息');
     for (const photo of withGps) {
       try {
-        const result = await window.photoPrint.reverseGeocode(photo.gps!);
+        const result = await window.photoPrint.reverseGeocode(photo.gps!, geocode);
         setPhotos((current) =>
           current.map((item) =>
             item.id === photo.id ? { ...item, city: result.city, address: result.address } : item
@@ -173,8 +196,20 @@ function App(): JSX.Element {
 
         <div className="stage">
           {selectedPhoto?.previewDataUrl ? (
-            <div className="photo-preview">
-              <img src={selectedPhoto.previewDataUrl} alt={selectedPhoto.fileName} />
+            <div
+              className="paper-preview"
+              style={{
+                aspectRatio: `${paperSize.width} / ${paperSize.height}`,
+                padding: `${Math.max(10, print.marginMm * 1.35)}px`
+              }}
+            >
+              <div className="print-image-area">
+                <img
+                  src={selectedPhoto.previewDataUrl}
+                  alt={selectedPhoto.fileName}
+                  style={{ objectFit: print.fit === 'cover' ? 'cover' : 'contain' }}
+                />
+              </div>
               <div
                 className={`watermark watermark-${watermark.position}`}
                 style={{
@@ -188,6 +223,9 @@ function App(): JSX.Element {
                   <span key={line}>{line}</span>
                 ))}
               </div>
+              <span className="paper-label">
+                {print.paper.toUpperCase()} · {print.orientation === 'portrait' ? '纵向' : '横向'}
+              </span>
             </div>
           ) : (
             <div className="preview-empty">
@@ -229,14 +267,18 @@ function App(): JSX.Element {
           <label>
             字体
             <select
-              value={watermark.fontFamily}
-              onChange={(event) =>
-                setWatermark({ ...watermark, fontFamily: event.target.value as WatermarkSettings['fontFamily'] })
-              }
+              value={selectedFontId}
+              onChange={(event) => {
+                const font = fonts.find((item) => item.id === event.target.value);
+                if (!font) return;
+                setWatermark({ ...watermark, fontFamily: font.family, fontPath: font.path });
+              }}
             >
-              <option>Helvetica</option>
-              <option>Times Roman</option>
-              <option>Courier</option>
+              {fonts.map((font) => (
+                <option key={font.id} value={font.id}>
+                  {font.family}{font.source === 'standard' ? ' · 标准' : ''}
+                </option>
+              ))}
             </select>
           </label>
           <div className="field-grid">
@@ -285,6 +327,34 @@ function App(): JSX.Element {
               <option value="center">居中</option>
             </select>
           </label>
+        </section>
+
+        <section className="settings-section">
+          <h2>
+            <MapPin size={16} />
+            地址解析
+          </h2>
+          <label>
+            服务
+            <select
+              value={geocode.provider}
+              onChange={(event) => setGeocode({ ...geocode, provider: event.target.value as GeocodeSettings['provider'] })}
+            >
+              <option value="amap">高德地图 · 国内优先</option>
+              <option value="osm">OpenStreetMap · 备用</option>
+            </select>
+          </label>
+          {geocode.provider === 'amap' && (
+            <label>
+              高德 Web 服务 Key
+              <input
+                type="password"
+                value={geocode.apiKey}
+                placeholder="amap web service key"
+                onChange={(event) => setGeocode({ ...geocode, apiKey: event.target.value })}
+              />
+            </label>
+          )}
         </section>
 
         <section className="settings-section">
@@ -375,6 +445,20 @@ function formatDate(value: string): string {
   const hours = String(parsed.getHours()).padStart(2, '0');
   const minutes = String(parsed.getMinutes()).padStart(2, '0');
   return `${year}-${month}-${date} ${hours}:${minutes}`;
+}
+
+function getPaperSize(print: PrintSettings): { width: number; height: number } {
+  const base = print.paper === 'letter' ? { width: 612, height: 792 } : { width: 595, height: 842 };
+  return print.orientation === 'portrait' ? base : { width: base.height, height: base.width };
+}
+
+function loadGeocodeSettings(): GeocodeSettings {
+  try {
+    const saved = localStorage.getItem('photomark-geocode');
+    return saved ? { ...defaultGeocode, ...JSON.parse(saved) } : defaultGeocode;
+  } catch {
+    return defaultGeocode;
+  }
 }
 
 createRoot(document.getElementById('root')!).render(

@@ -1,11 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { exiftool } from 'exiftool-vendored';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import fontkit from '@pdf-lib/fontkit';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import sharp from 'sharp';
 import type {
+  FontOption,
+  GeocodeSettings,
   GeocodeResult,
   GpsPoint,
   PhotoRecord,
@@ -15,6 +19,12 @@ import type {
 
 const IMAGE_FILTERS = [
   { name: 'Photos', extensions: ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp', 'tif', 'tiff'] }
+];
+
+const STANDARD_FONTS: FontOption[] = [
+  { id: 'standard:Helvetica', family: 'Helvetica', path: null, source: 'standard' },
+  { id: 'standard:Times Roman', family: 'Times Roman', path: null, source: 'standard' },
+  { id: 'standard:Courier', family: 'Courier', path: null, source: 'standard' }
 ];
 
 const PAPER_SIZES = {
@@ -80,7 +90,13 @@ ipcMain.handle('photos:select', async () => {
   return photos;
 });
 
-ipcMain.handle('geo:reverse', async (_event, gps: GpsPoint) => reverseGeocode(gps));
+ipcMain.handle('fonts:list', async () => listFonts());
+
+ipcMain.handle(
+  'geo:reverse',
+  async (_event, payload: { gps: GpsPoint; settings: GeocodeSettings }) =>
+    reverseGeocode(payload.gps, payload.settings)
+);
 
 ipcMain.handle(
   'print:generate-pdf',
@@ -248,8 +264,81 @@ async function geocodeCachePath(): Promise<string> {
   return path.join(app.getPath('userData'), 'geocode-cache.json');
 }
 
-async function reverseGeocode(gps: GpsPoint): Promise<GeocodeResult> {
-  const key = `${gps.lat.toFixed(4)},${gps.lon.toFixed(4)}`;
+async function reverseGeocode(gps: GpsPoint, settings: GeocodeSettings): Promise<GeocodeResult> {
+  const provider = settings.provider ?? 'amap';
+  const key = `${provider}:${gps.lat.toFixed(4)},${gps.lon.toFixed(4)}`;
+  if (geocodeCache[key]) return geocodeCache[key];
+
+  const result = provider === 'amap' ? await reverseGeocodeAmap(gps, settings.apiKey) : await reverseGeocodeOsm(gps);
+
+  geocodeCache[key] = result;
+  await saveGeocodeCache();
+  return result;
+}
+
+async function reverseGeocodeAmap(gps: GpsPoint, apiKey: string): Promise<GeocodeResult> {
+  if (!apiKey.trim()) {
+    throw new Error('请填写高德地图 Web 服务 API Key');
+  }
+
+  const location = await convertGpsToAmap(gps, apiKey);
+  const url = new URL('https://restapi.amap.com/v3/geocode/regeo');
+  url.searchParams.set('key', apiKey);
+  url.searchParams.set('location', location);
+  url.searchParams.set('extensions', 'base');
+  url.searchParams.set('radius', '1000');
+  url.searchParams.set('output', 'json');
+
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`高德地址解析失败：${response.status}`);
+
+  const data = (await response.json()) as {
+    status?: string;
+    info?: string;
+    regeocode?: {
+      formatted_address?: string;
+      addressComponent?: {
+        province?: string;
+        city?: string | string[];
+        district?: string;
+      };
+    };
+  };
+
+  if (data.status !== '1' || !data.regeocode) {
+    throw new Error(data.info || '高德地址解析失败');
+  }
+
+  const component = data.regeocode.addressComponent ?? {};
+  const rawCity = Array.isArray(component.city) ? '' : component.city;
+  const city = rawCity || component.district || component.province || null;
+
+  return {
+    city,
+    address: data.regeocode.formatted_address ?? null
+  };
+}
+
+async function convertGpsToAmap(gps: GpsPoint, apiKey: string): Promise<string> {
+  const url = new URL('https://restapi.amap.com/v3/assistant/coordinate/convert');
+  url.searchParams.set('key', apiKey);
+  url.searchParams.set('locations', `${gps.lon},${gps.lat}`);
+  url.searchParams.set('coordsys', 'gps');
+  url.searchParams.set('output', 'json');
+
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`高德坐标转换失败：${response.status}`);
+
+  const data = (await response.json()) as { status?: string; info?: string; locations?: string };
+  if (data.status !== '1' || !data.locations) {
+    throw new Error(data.info || '高德坐标转换失败');
+  }
+
+  return data.locations.split(';')[0];
+}
+
+async function reverseGeocodeOsm(gps: GpsPoint): Promise<GeocodeResult> {
+  const key = `osm:${gps.lat.toFixed(4)},${gps.lon.toFixed(4)}`;
   if (geocodeCache[key]) return geocodeCache[key];
 
   const url = new URL('https://nominatim.openstreetmap.org/reverse');
@@ -282,14 +371,10 @@ async function reverseGeocode(gps: GpsPoint): Promise<GeocodeResult> {
   };
   const address = data.address ?? {};
   const city = address.city ?? address.town ?? address.village ?? address.county ?? address.state ?? null;
-  const result = {
+  return {
     city,
     address: data.display_name ?? null
   };
-
-  geocodeCache[key] = result;
-  await saveGeocodeCache();
-  return result;
 }
 
 async function generatePrintPdf(
@@ -298,7 +383,8 @@ async function generatePrintPdf(
   print: PrintSettings
 ): Promise<string> {
   const doc = await PDFDocument.create();
-  const font = await doc.embedFont(pickPdfFont(watermark.fontFamily));
+  doc.registerFontkit(fontkit);
+  const font = await embedWatermarkFont(doc, watermark);
   const paper = PAPER_SIZES[print.paper];
   const pageSize =
     print.orientation === 'portrait' ? [paper.width, paper.height] : [paper.height, paper.width];
@@ -380,10 +466,83 @@ async function printPdf(pdfPath: string): Promise<void> {
   });
 }
 
-function pickPdfFont(fontFamily: WatermarkSettings['fontFamily']) {
+async function embedWatermarkFont(doc: PDFDocument, watermark: WatermarkSettings) {
+  if (watermark.fontPath) {
+    const bytes = await readFile(watermark.fontPath);
+    return doc.embedFont(bytes, { subset: true });
+  }
+
+  return doc.embedFont(pickPdfFont(watermark.fontFamily));
+}
+
+function pickPdfFont(fontFamily: string) {
   if (fontFamily === 'Courier') return StandardFonts.Courier;
   if (fontFamily === 'Times Roman') return StandardFonts.TimesRoman;
   return StandardFonts.Helvetica;
+}
+
+async function listFonts(): Promise<FontOption[]> {
+  const fontDirs = getSystemFontDirs();
+  const systemFonts = await Promise.all(fontDirs.map((dir) => scanFontDir(dir)));
+  const flattened = systemFonts.flat();
+  const unique = new Map<string, FontOption>();
+
+  for (const font of [...STANDARD_FONTS, ...flattened]) {
+    if (!unique.has(font.id)) unique.set(font.id, font);
+  }
+
+  return [...unique.values()].sort((a, b) => {
+    if (a.source !== b.source) return a.source === 'standard' ? -1 : 1;
+    return a.family.localeCompare(b.family, 'zh-Hans-CN');
+  });
+}
+
+function getSystemFontDirs(): string[] {
+  if (process.platform === 'win32') {
+    return ['C:\\Windows\\Fonts'];
+  }
+
+  if (process.platform === 'darwin') {
+    return [
+      '/System/Library/Fonts',
+      '/Library/Fonts',
+      path.join(os.homedir(), 'Library/Fonts')
+    ];
+  }
+
+  return [
+    '/usr/share/fonts',
+    '/usr/local/share/fonts',
+    path.join(os.homedir(), '.fonts'),
+    path.join(os.homedir(), '.local/share/fonts')
+  ];
+}
+
+async function scanFontDir(dir: string): Promise<FontOption[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const nested = await Promise.all(
+      entries.map(async (entry) => {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) return scanFontDir(fullPath);
+        if (!entry.isFile() || !/\.(ttf|otf)$/i.test(entry.name)) return [];
+
+        const family = path.basename(entry.name, path.extname(entry.name)).replace(/[-_]+/g, ' ');
+        return [
+          {
+            id: `system:${fullPath}`,
+            family,
+            path: fullPath,
+            source: 'system' as const
+          }
+        ];
+      })
+    );
+
+    return nested.flat();
+  } catch {
+    return [];
+  }
 }
 
 function fitRect(
