@@ -46,8 +46,31 @@ npm run dist
 - `pack` 生成未安装的应用目录，适合本地快速检查。
 - `dist` 生成 Windows/macOS 安装包或压缩包，输出到 `release/`。
 - 不要同时运行 `pack` 和 `dist`，它们会写入同一个 `release/` 目录。
-- 当前 macOS 包未配置 Developer ID 签名，也还未配置自定义应用图标。
+- 当前还未配置自定义应用图标。
 - Windows 安装包建议在 Windows 构建环境中执行 `npm run dist` 验证。
+
+## macOS 签名和公证
+
+项目已配置 hardened runtime 和 entitlements：
+
+- `build/entitlements.mac.plist`
+- `package.json` 的 `build.mac.hardenedRuntime`
+- `package.json` 的 `build.mac.entitlements`
+- `package.json` 的 `build.mac.entitlementsInherit`
+
+签名/公证需要 Apple Developer 账号和 Developer ID Application 证书。
+
+常用环境变量：
+
+```bash
+export CSC_NAME="Developer ID Application: Your Name (TEAMID)"
+export APPLE_API_KEY="/absolute/path/AuthKey_XXXXXXXXXX.p8"
+export APPLE_API_KEY_ID="XXXXXXXXXX"
+export APPLE_API_ISSUER="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+npm run dist
+```
+
+如果本机钥匙串里没有可用 Developer ID Application 证书，`npm run dist` 会生成未签名包，并在日志中提示跳过签名。未签名包适合本地测试，不适合直接分发给普通 macOS 用户。
 
 ## 注意事项
 
