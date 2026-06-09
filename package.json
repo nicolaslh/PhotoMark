@@ -2,17 +2,20 @@
   "name": "photo-print-assistant",
   "version": "0.1.0",
   "description": "Electron photo print assistant with temporary date and location watermarks.",
-  "main": "dist/main/index.js",
+  "author": "nicolaslh",
+  "main": "out/main/index.js",
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "pack": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder",
     "typecheck": "tsc --noEmit",
     "start": "electron-vite preview"
   },
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
-    "exiftool-vendored": "^29.3.0",
+    "exiftool-vendored": "^36.0.0",
     "heic-convert": "^2.1.0",
     "lucide-react": "^0.468.0",
     "pdf-lib": "^1.17.1",
@@ -25,9 +28,40 @@
     "@types/react": "^18.3.16",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
-    "electron-vite": "^2.3.0",
+    "electron": "^42.3.3",
+    "electron-builder": "^26.15.2",
+    "electron-vite": "^5.0.0",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11"
+    "vite": "^7.3.5"
+  },
+  "build": {
+    "appId": "com.nicolaslh.photomark",
+    "productName": "PhotoMark",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.photography",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

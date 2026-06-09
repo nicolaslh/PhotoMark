@@ -750,7 +750,7 @@ function getPhotoAreaStyle(print: PrintSettings, photo: PhotoRecord | null): Rea
 
   const paperMm = getPaperSizeMm(print);
   const size = getPhotoSizeMm(print);
-  const isLandscape = photo?.previewDataUrl ? false : false;
+  const isLandscape = Boolean(photo?.width && photo?.height && photo.width > photo.height);
   let width = size.width;
   let height = size.height;
 

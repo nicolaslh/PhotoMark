@@ -14,6 +14,8 @@ export type PhotoRecord = {
   city: string | null;
   address: string | null;
   previewDataUrl: string | null;
+  width: number | null;
+  height: number | null;
   status: 'ready' | 'metadata-error' | 'preview-error';
   error?: string;
 };

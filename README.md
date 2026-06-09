@@ -36,6 +36,19 @@ npm run typecheck
 npm run build
 ```
 
+## 打包
+
+```bash
+npm run pack
+npm run dist
+```
+
+- `pack` 生成未安装的应用目录，适合本地快速检查。
+- `dist` 生成 Windows/macOS 安装包或压缩包，输出到 `release/`。
+- 不要同时运行 `pack` 和 `dist`，它们会写入同一个 `release/` 目录。
+- 当前 macOS 包未配置 Developer ID 签名，也还未配置自定义应用图标。
+- Windows 安装包建议在 Windows 构建环境中执行 `npm run dist` 验证。
+
 ## 注意事项
 
 - HEIC/HEIF 会在应用内部临时转换为 JPEG 参与预览和打印，原文件不会被写入。

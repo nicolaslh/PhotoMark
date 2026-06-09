@@ -196,7 +196,7 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
     const tagRecord = tags as unknown as Record<string, unknown>;
     const date = pickCapturedDate(tagRecord, stats.birthtime);
     const gps = pickGps(tagRecord);
-    const previewDataUrl = await createPreviewDataUrl(filePath);
+    const preview = await createPreview(filePath);
 
     return {
       id: `${filePath}-${stats.size}-${stats.mtimeMs}`,
@@ -208,9 +208,11 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
       gps,
       city: null,
       address: null,
-      previewDataUrl,
-      status: previewDataUrl ? 'ready' : 'preview-error',
-      error: previewDataUrl ? undefined : '无法生成预览，但仍可尝试打印。'
+      previewDataUrl: preview?.dataUrl ?? null,
+      width: preview?.width ?? null,
+      height: preview?.height ?? null,
+      status: preview ? 'ready' : 'preview-error',
+      error: preview ? undefined : '无法生成预览，但仍可尝试打印。'
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取元数据失败';
@@ -226,6 +228,8 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
       city: null,
       address: null,
       previewDataUrl: null,
+      width: null,
+      height: null,
       status: 'metadata-error',
       error: message
     };
@@ -289,10 +293,15 @@ function pickGps(tags: Record<string, unknown>): GpsPoint | null {
   return null;
 }
 
-async function createPreviewDataUrl(filePath: string): Promise<string | null> {
+async function createPreview(filePath: string): Promise<{ dataUrl: string; width: number | null; height: number | null } | null> {
   try {
     const buffer = await createJpegBuffer(filePath, 1600);
-    return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+    const metadata = await sharp(buffer).metadata();
+    return {
+      dataUrl: `data:image/jpeg;base64,${buffer.toString('base64')}`,
+      width: metadata.width ?? null,
+      height: metadata.height ?? null
+    };
   } catch {
     return null;
   }
@@ -496,9 +505,9 @@ async function generatePrintPdf(
     });
 
     try {
-      const page = doc.addPage(pageSize as [number, number]);
       const imageBuffer = await createJpegBuffer(photo.path);
       const image = await doc.embedJpg(imageBuffer);
+      const page = doc.addPage(pageSize as [number, number]);
       const box = getPhotoPrintBox(page.getWidth(), page.getHeight(), margin, print, image.width >= image.height);
       const imageSize = fitRect(image.width, image.height, box.width, box.height, print.fit);
       const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
@@ -550,10 +559,6 @@ async function generatePrintPdf(
         status: 'done'
       });
     } catch (error) {
-      if (doc.getPageCount() > 0) {
-        doc.removePage(doc.getPageCount() - 1);
-      }
-
       const message = error instanceof Error ? error.message : '处理失败';
       failures.push({ photoId: photo.id, fileName: photo.fileName, message });
       onProgress?.({
@@ -711,13 +716,16 @@ async function listPrinters(): Promise<PrinterSummary[]> {
   if (!mainWindow) return [];
 
   const printers = await mainWindow.webContents.getPrintersAsync();
-  return printers.map((printer) => ({
-    name: printer.name,
-    displayName: printer.displayName || printer.name,
-    description: printer.description || '',
-    status: printer.status,
-    isDefault: Boolean(printer.isDefault)
-  }));
+  return printers.map((printer) => {
+    const printerInfo = printer as typeof printer & { status?: number; isDefault?: boolean };
+    return {
+      name: printer.name,
+      displayName: printer.displayName || printer.name,
+      description: printer.description || '',
+      status: printerInfo.status ?? 0,
+      isDefault: Boolean(printerInfo.isDefault)
+    };
+  });
 }
 
 async function scanFontDir(dir: string): Promise<FontOption[]> {
