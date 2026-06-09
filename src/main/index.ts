@@ -66,7 +66,7 @@ function createWindow(): void {
     title: '照片打印助手',
     backgroundColor: '#f6f7f9',
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
+      preload: path.join(__dirname, '../preload/index.mjs'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
