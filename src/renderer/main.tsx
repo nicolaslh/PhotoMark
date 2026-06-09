@@ -10,6 +10,9 @@ import {
   MapPin,
   Printer,
   RefreshCcw,
+  RotateCcw,
+  RotateCw,
+  Scissors,
   Type
 } from 'lucide-react';
 import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
@@ -265,6 +268,41 @@ function App(): JSX.Element {
     setTemplates((current) => current.filter((item) => item.id !== templateId));
   }
 
+  function updateSelectedPhoto(patch: Partial<PhotoRecord>): void {
+    if (!selectedPhoto) return;
+    setPhotos((current) =>
+      current.map((photo) => (photo.id === selectedPhoto.id ? { ...photo, ...patch } : photo))
+    );
+  }
+
+  function updateSelectedAdjustments(patch: Partial<PhotoRecord['adjustments']>): void {
+    if (!selectedPhoto) return;
+    updateSelectedPhoto({
+      adjustments: {
+        ...selectedPhoto.adjustments,
+        ...patch
+      }
+    });
+  }
+
+  function updateCrop(side: keyof PhotoRecord['adjustments']['crop'], value: number): void {
+    if (!selectedPhoto) return;
+    updateSelectedAdjustments({
+      crop: {
+        ...selectedPhoto.adjustments.crop,
+        [side]: value
+      }
+    });
+  }
+
+  function resetAdjustments(): void {
+    updateSelectedAdjustments({
+      rotateDeg: 0,
+      brightness: 1,
+      crop: { top: 0, right: 0, bottom: 0, left: 0 }
+    });
+  }
+
   return (
     <main className="app-shell">
       <aside className="photo-rail">
@@ -376,7 +414,12 @@ function App(): JSX.Element {
                 <img
                   src={selectedPhoto.previewDataUrl}
                   alt={selectedPhoto.fileName}
-                  style={{ objectFit: print.fit === 'cover' ? 'cover' : 'contain' }}
+                  style={{
+                    objectFit: print.fit === 'cover' ? 'cover' : 'contain',
+                    transform: `rotate(${selectedPhoto.adjustments.rotateDeg}deg)`,
+                    filter: `brightness(${selectedPhoto.adjustments.brightness})`,
+                    clipPath: cropToClipPath(selectedPhoto.adjustments.crop)
+                  }}
                 />
               </div>
               <div
@@ -700,12 +743,100 @@ function App(): JSX.Element {
             <Calendar size={16} />
             当前照片
           </h2>
-          <p>{selectedPhoto?.capturedAt ? formatDate(selectedPhoto.capturedAt) : '暂无拍摄时间'}</p>
+          <label>
+            拍摄时间
+            <input
+              type="datetime-local"
+              value={selectedPhoto?.capturedAt ? toDateTimeInputValue(selectedPhoto.capturedAt) : ''}
+              onChange={(event) =>
+                updateSelectedPhoto({
+                  capturedAt: event.target.value ? new Date(event.target.value).toISOString() : null,
+                  capturedAtSource: 'manual'
+                })
+              }
+              disabled={!selectedPhoto}
+            />
+          </label>
           <h2>
             <MapPin size={16} />
             地址
           </h2>
-          <p>{selectedPhoto?.city ?? '暂无城市信息'}</p>
+          <label>
+            城市
+            <input
+              type="text"
+              value={selectedPhoto?.city ?? ''}
+              placeholder="手动填写城市"
+              onChange={(event) => updateSelectedPhoto({ city: event.target.value })}
+              disabled={!selectedPhoto}
+            />
+          </label>
+        </section>
+
+        <section className="settings-section">
+          <h2>
+            <Scissors size={16} />
+            图片调整
+          </h2>
+          <div className="button-row">
+            <button
+              className="text-button"
+              disabled={!selectedPhoto}
+              onClick={() =>
+                updateSelectedAdjustments({
+                  rotateDeg: (((selectedPhoto?.adjustments.rotateDeg ?? 0) + 270) % 360) as PhotoRecord['adjustments']['rotateDeg']
+                })
+              }
+            >
+              <RotateCcw size={16} />
+              左转
+            </button>
+            <button
+              className="text-button"
+              disabled={!selectedPhoto}
+              onClick={() =>
+                updateSelectedAdjustments({
+                  rotateDeg: (((selectedPhoto?.adjustments.rotateDeg ?? 0) + 90) % 360) as PhotoRecord['adjustments']['rotateDeg']
+                })
+              }
+            >
+              <RotateCw size={16} />
+              右转
+            </button>
+          </div>
+          <label>
+            亮度
+            <input
+              type="range"
+              min="0.5"
+              max="1.5"
+              step="0.05"
+              value={selectedPhoto?.adjustments.brightness ?? 1}
+              onChange={(event) => updateSelectedAdjustments({ brightness: Number(event.target.value) })}
+              disabled={!selectedPhoto}
+            />
+            <span className="hint">{Math.round((selectedPhoto?.adjustments.brightness ?? 1) * 100)}%</span>
+          </label>
+          <div className="crop-grid">
+            {(['top', 'right', 'bottom', 'left'] as const).map((side) => (
+              <label key={side}>
+                {cropSideLabel(side)}
+                <input
+                  type="range"
+                  min="0"
+                  max="45"
+                  step="1"
+                  value={selectedPhoto?.adjustments.crop[side] ?? 0}
+                  onChange={(event) => updateCrop(side, Number(event.target.value))}
+                  disabled={!selectedPhoto}
+                />
+              </label>
+            ))}
+          </div>
+          <button className="text-button" disabled={!selectedPhoto} onClick={resetAdjustments}>
+            <RefreshCcw size={16} />
+            重置调整
+          </button>
         </section>
       </aside>
     </main>
@@ -736,6 +867,28 @@ function formatDate(value: string): string {
   const hours = String(parsed.getHours()).padStart(2, '0');
   const minutes = String(parsed.getMinutes()).padStart(2, '0');
   return `${year}-${month}-${date} ${hours}:${minutes}`;
+}
+
+function toDateTimeInputValue(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const date = String(parsed.getDate()).padStart(2, '0');
+  const hours = String(parsed.getHours()).padStart(2, '0');
+  const minutes = String(parsed.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${date}T${hours}:${minutes}`;
+}
+
+function cropToClipPath(crop: PhotoRecord['adjustments']['crop']): string {
+  return `inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%)`;
+}
+
+function cropSideLabel(side: keyof PhotoRecord['adjustments']['crop']): string {
+  if (side === 'top') return '上裁剪';
+  if (side === 'right') return '右裁剪';
+  if (side === 'bottom') return '下裁剪';
+  return '左裁剪';
 }
 
 function getPaperSize(print: PrintSettings): { width: number; height: number } {

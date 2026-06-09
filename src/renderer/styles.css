@@ -527,7 +527,8 @@ textarea,
 select,
 input[type='number'],
 input[type='password'],
-input[type='text'] {
+input[type='text'],
+input[type='datetime-local'] {
   width: 100%;
   min-height: 36px;
   border: 1px solid #d6dce2;
@@ -625,6 +626,12 @@ input[type='range'] {
   color: #6c7680;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.crop-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .metadata p {

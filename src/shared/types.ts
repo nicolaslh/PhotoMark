@@ -16,8 +16,22 @@ export type PhotoRecord = {
   previewDataUrl: string | null;
   width: number | null;
   height: number | null;
+  adjustments: PhotoAdjustments;
   status: 'ready' | 'metadata-error' | 'preview-error';
   error?: string;
+};
+
+export type CropMargins = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
+export type PhotoAdjustments = {
+  rotateDeg: 0 | 90 | 180 | 270;
+  brightness: number;
+  crop: CropMargins;
 };
 
 export type WatermarkPosition =

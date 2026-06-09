@@ -14,6 +14,7 @@ import type {
   GeocodeResult,
   GpsPoint,
   PhotoRecord,
+  PhotoAdjustments,
   PrintFailure,
   PrinterSummary,
   PrintSettings,
@@ -40,6 +41,16 @@ const PHOTO_SIZES_MM = {
   '4r': { width: 101.6, height: 152.4 },
   '5r': { width: 127, height: 177.8 },
   '6r': { width: 152.4, height: 203.2 }
+};
+const DEFAULT_ADJUSTMENTS: PhotoAdjustments = {
+  rotateDeg: 0,
+  brightness: 1,
+  crop: {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0
+  }
 };
 
 let mainWindow: BrowserWindow | null = null;
@@ -211,6 +222,7 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
       previewDataUrl: preview?.dataUrl ?? null,
       width: preview?.width ?? null,
       height: preview?.height ?? null,
+      adjustments: DEFAULT_ADJUSTMENTS,
       status: preview ? 'ready' : 'preview-error',
       error: preview ? undefined : '无法生成预览，但仍可尝试打印。'
     };
@@ -230,6 +242,7 @@ async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
       previewDataUrl: null,
       width: null,
       height: null,
+      adjustments: DEFAULT_ADJUSTMENTS,
       status: 'metadata-error',
       error: message
     };
@@ -307,11 +320,31 @@ async function createPreview(filePath: string): Promise<{ dataUrl: string; width
   }
 }
 
-async function createJpegBuffer(filePath: string, maxSize?: number): Promise<Buffer> {
+async function createJpegBuffer(
+  filePath: string,
+  maxSize?: number,
+  adjustments: PhotoAdjustments = DEFAULT_ADJUSTMENTS
+): Promise<Buffer> {
   const ext = path.extname(filePath).toLowerCase();
   const isHeic = ext === '.heic' || ext === '.heif';
   const input = isHeic ? await convertHeicToJpeg(filePath) : filePath;
-  let pipeline = sharp(input).rotate().jpeg({ quality: 92, mozjpeg: true });
+  let pipeline = sharp(input).rotate();
+  const metadata = await pipeline.metadata();
+
+  const cropRegion = getCropRegion(metadata.width, metadata.height, adjustments.crop);
+  if (cropRegion) {
+    pipeline = pipeline.extract(cropRegion);
+  }
+
+  if (adjustments.rotateDeg !== 0) {
+    pipeline = pipeline.rotate(adjustments.rotateDeg);
+  }
+
+  if (adjustments.brightness !== 1) {
+    pipeline = pipeline.modulate({ brightness: clamp(adjustments.brightness, 0.2, 2) });
+  }
+
+  pipeline = pipeline.jpeg({ quality: 92, mozjpeg: true });
 
   if (maxSize) {
     pipeline = pipeline.resize({ width: maxSize, height: maxSize, fit: 'inside', withoutEnlargement: true });
@@ -505,7 +538,7 @@ async function generatePrintPdf(
     });
 
     try {
-      const imageBuffer = await createJpegBuffer(photo.path);
+      const imageBuffer = await createJpegBuffer(photo.path, undefined, photo.adjustments);
       const image = await doc.embedJpg(imageBuffer);
       const page = doc.addPage(pageSize as [number, number]);
       const box = getPhotoPrintBox(page.getWidth(), page.getHeight(), margin, print, image.width >= image.height);
@@ -824,6 +857,34 @@ function getPhotoSizeMm(print: PrintSettings): { width: number; height: number }
   if (print.photoSize === '5r') return PHOTO_SIZES_MM['5r'];
   if (print.photoSize === '6r') return PHOTO_SIZES_MM['6r'];
   return PHOTO_SIZES_MM['4r'];
+}
+
+function getCropRegion(
+  width: number | undefined,
+  height: number | undefined,
+  crop: PhotoAdjustments['crop']
+): { left: number; top: number; width: number; height: number } | null {
+  if (!width || !height) return null;
+
+  const leftPct = clamp(crop.left, 0, 95);
+  const rightPct = clamp(crop.right, 0, 95);
+  const topPct = clamp(crop.top, 0, 95);
+  const bottomPct = clamp(crop.bottom, 0, 95);
+  const cropWidthPct = clamp(100 - leftPct - rightPct, 5, 100);
+  const cropHeightPct = clamp(100 - topPct - bottomPct, 5, 100);
+  const left = Math.floor((width * leftPct) / 100);
+  const top = Math.floor((height * topPct) / 100);
+  const cropWidth = Math.max(1, Math.floor((width * cropWidthPct) / 100));
+  const cropHeight = Math.max(1, Math.floor((height * cropHeightPct) / 100));
+
+  if (left === 0 && top === 0 && cropWidth === width && cropHeight === height) return null;
+
+  return {
+    left: Math.min(left, width - 1),
+    top: Math.min(top, height - 1),
+    width: Math.min(cropWidth, width - left),
+    height: Math.min(cropHeight, height - top)
+  };
 }
 
 function getWatermarkPoint(
