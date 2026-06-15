@@ -8,11 +8,16 @@ export type PhotoRecord = {
   path: string;
   fileName: string;
   extension: string;
+  fileSize: number | null;
+  createdAt: string | null;
+  modifiedAt: string | null;
   capturedAt: string | null;
   capturedAtSource: string;
   gps: GpsPoint | null;
+  gpsSource: string | null;
   city: string | null;
   address: string | null;
+  locationSource: string | null;
   previewDataUrl: string | null;
   width: number | null;
   height: number | null;
@@ -47,19 +52,28 @@ export type WatermarkSettings = {
   fontPath: string | null;
   fontSize: number;
   color: string;
+  addressFontFamily: string;
+  addressFontPath: string | null;
+  addressFontSize: number;
+  addressColor: string;
   opacity: number;
   position: WatermarkPosition;
   marginMm: number;
+  backgroundEnabled: boolean;
 };
 
+export type PaperSize = 'a3' | 'a4' | 'a5' | 'letter' | 'legal' | 'photo-4r' | 'photo-5r' | 'photo-6r' | 'custom';
+
 export type PrintSettings = {
-  paper: 'a4' | 'letter';
+  paper: PaperSize;
   orientation: 'portrait' | 'landscape';
   marginMm: number;
-  fit: 'contain' | 'cover';
+  fit: 'contain' | 'cover' | 'adaptive';
   photoSize: 'fit-page' | '4r' | '5r' | '6r' | 'custom';
   customPhotoWidthMm: number;
   customPhotoHeightMm: number;
+  customPaperWidthMm: number;
+  customPaperHeightMm: number;
   printerName: string;
   copies: number;
   scalePercent: number;
@@ -103,6 +117,16 @@ export type BatchProgressEvent = {
   photoId: string;
   fileName: string;
   status: 'pending' | 'processing' | 'done' | 'error' | 'canceled';
+  message?: string;
+};
+
+export type ImportProgressEvent = {
+  mode: 'files' | 'folder';
+  stage: 'dialog' | 'scanning' | 'selected' | 'metadata' | 'preview' | 'done' | 'warning' | 'error';
+  index: number;
+  total: number;
+  fileName?: string;
+  path?: string;
   message?: string;
 };
 

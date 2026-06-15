@@ -4,6 +4,7 @@ import type {
   GeocodeSettings,
   GpsPoint,
   FontOption,
+  ImportProgressEvent,
   PhotoRecord,
   PrinterSummary,
   PrintResult,
@@ -33,6 +34,7 @@ declare global {
       ) => Promise<PrintResult>;
       cancelBatch: (jobId: string) => Promise<void>;
       onBatchProgress: (callback: (event: BatchProgressEvent) => void) => () => void;
+      onImportProgress: (callback: (event: ImportProgressEvent) => void) => () => void;
       generateCalibrationPdf: (print: PrintSettings) => Promise<PrintResult>;
       printCalibration: (print: PrintSettings) => Promise<PrintResult>;
       openPath: (path: string) => Promise<void>;

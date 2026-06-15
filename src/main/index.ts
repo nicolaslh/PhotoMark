@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import type { WebContents } from 'electron';
 import { exiftool } from 'exiftool-vendored';
 import fontkit from '@pdf-lib/fontkit';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -13,6 +14,7 @@ import type {
   GeocodeSettings,
   GeocodeResult,
   GpsPoint,
+  ImportProgressEvent,
   PhotoRecord,
   PhotoAdjustments,
   PrintFailure,
@@ -26,6 +28,8 @@ const IMAGE_FILTERS = [
   { name: 'Photos', extensions: ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp', 'tif', 'tiff'] }
 ];
 const IMAGE_EXTENSIONS = new Set(IMAGE_FILTERS[0].extensions);
+const METADATA_TIMEOUT_MS = 30_000;
+const PREVIEW_TIMEOUT_MS = 45_000;
 
 const STANDARD_FONTS: FontOption[] = [
   { id: 'standard:Helvetica', family: 'Helvetica', path: null, source: 'standard' },
@@ -34,8 +38,14 @@ const STANDARD_FONTS: FontOption[] = [
 ];
 
 const PAPER_SIZES = {
+  a3: { width: 841.89, height: 1190.55 },
   a4: { width: 595.28, height: 841.89 },
-  letter: { width: 612, height: 792 }
+  a5: { width: 419.53, height: 595.28 },
+  letter: { width: 612, height: 792 },
+  legal: { width: 612, height: 1008 },
+  'photo-4r': { width: 288, height: 432 },
+  'photo-5r': { width: 360, height: 504 },
+  'photo-6r': { width: 432, height: 576 }
 };
 const PHOTO_SIZES_MM = {
   '4r': { width: 101.6, height: 152.4 },
@@ -63,7 +73,7 @@ function createWindow(): void {
     height: 840,
     minWidth: 1100,
     minHeight: 720,
-    title: '照片打印助手',
+    title: 'PhotoMark',
     backgroundColor: '#f6f7f9',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.mjs'),
@@ -97,8 +107,16 @@ app.on('before-quit', async () => {
   await exiftool.end();
 });
 
-ipcMain.handle('photos:select', async () => {
+ipcMain.handle('photos:select', async (event) => {
   if (!mainWindow) return [];
+
+  sendImportProgress(event.sender, {
+    mode: 'files',
+    stage: 'dialog',
+    index: 0,
+    total: 0,
+    message: '等待选择照片'
+  });
 
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择照片',
@@ -108,12 +126,19 @@ ipcMain.handle('photos:select', async () => {
 
   if (result.canceled) return [];
 
-  const photos = await Promise.all(result.filePaths.map((filePath) => inspectPhoto(filePath)));
-  return photos;
+  return importPhotos(result.filePaths, 'files', (progress) => sendImportProgress(event.sender, progress));
 });
 
-ipcMain.handle('photos:select-folder', async () => {
+ipcMain.handle('photos:select-folder', async (event) => {
   if (!mainWindow) return [];
+
+  sendImportProgress(event.sender, {
+    mode: 'folder',
+    stage: 'dialog',
+    index: 0,
+    total: 0,
+    message: '等待选择照片文件夹'
+  });
 
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择照片文件夹',
@@ -122,9 +147,16 @@ ipcMain.handle('photos:select-folder', async () => {
 
   if (result.canceled || result.filePaths.length === 0) return [];
 
+  sendImportProgress(event.sender, {
+    mode: 'folder',
+    stage: 'scanning',
+    index: 0,
+    total: 0,
+    path: result.filePaths[0],
+    message: '正在扫描照片文件夹'
+  });
   const filePaths = await collectImageFiles(result.filePaths[0]);
-  const photos = await Promise.all(filePaths.map((filePath) => inspectPhoto(filePath)));
-  return photos;
+  return importPhotos(filePaths, 'folder', (progress) => sendImportProgress(event.sender, progress));
 });
 
 ipcMain.handle('fonts:list', async () => listFonts());
@@ -198,47 +230,166 @@ ipcMain.handle('files:open-path', async (_event, filePath: string) => {
   await shell.openPath(filePath);
 });
 
-async function inspectPhoto(filePath: string): Promise<PhotoRecord> {
+type ImportProgressReporter = (event: ImportProgressEvent) => void;
+
+type InspectPhotoContext = {
+  mode: ImportProgressEvent['mode'];
+  index: number;
+  total: number;
+  onProgress?: ImportProgressReporter;
+};
+
+function sendImportProgress(sender: WebContents, progress: ImportProgressEvent): void {
+  if (sender.isDestroyed()) return;
+  sender.send('import:progress', progress);
+}
+
+async function importPhotos(
+  filePaths: string[],
+  mode: ImportProgressEvent['mode'],
+  onProgress: ImportProgressReporter
+): Promise<PhotoRecord[]> {
+  const total = filePaths.length;
+  onProgress({
+    mode,
+    stage: 'selected',
+    index: 0,
+    total,
+    message: total > 0 ? `已找到 ${total} 张照片` : '没有找到可导入的照片'
+  });
+
+  const photos: PhotoRecord[] = [];
+  for (let index = 0; index < filePaths.length; index += 1) {
+    const photo = await inspectPhoto(filePaths[index], {
+      mode,
+      index: index + 1,
+      total,
+      onProgress
+    });
+    photos.push(photo);
+  }
+
+  onProgress({
+    mode,
+    stage: 'done',
+    index: total,
+    total,
+    message: total > 0 ? `照片导入完成：${photos.length}/${total}` : '没有找到可导入的照片'
+  });
+
+  return photos;
+}
+
+function reportPhotoImportStage(
+  context: InspectPhotoContext | undefined,
+  stage: ImportProgressEvent['stage'],
+  filePath: string,
+  message?: string
+): void {
+  context?.onProgress?.({
+    mode: context.mode,
+    stage,
+    index: context.index,
+    total: context.total,
+    fileName: path.basename(filePath),
+    path: filePath,
+    message
+  });
+}
+
+async function inspectPhoto(filePath: string, context?: InspectPhotoContext): Promise<PhotoRecord> {
   const extension = path.extname(filePath).replace('.', '').toLowerCase();
   const fileName = path.basename(filePath);
 
   try {
-    const [tags, stats] = await Promise.all([exiftool.read(filePath), stat(filePath)]);
-    const tagRecord = tags as unknown as Record<string, unknown>;
-    const date = pickCapturedDate(tagRecord, stats.birthtime);
-    const gps = pickGps(tagRecord);
-    const preview = await createPreview(filePath);
+    reportPhotoImportStage(context, 'metadata', filePath, '读取文件大小、修改时间、EXIF 拍摄时间和多种 GPS 字段');
+    const stats = await stat(filePath);
+    let metadataError: string | undefined;
+    let tagRecord: Record<string, unknown> = {};
 
-    return {
+    try {
+      const tags = await withTimeout(
+        exiftool.read(filePath),
+        METADATA_TIMEOUT_MS,
+        `读取 EXIF 超时（超过 ${Math.round(METADATA_TIMEOUT_MS / 1000)} 秒）`
+      );
+      tagRecord = tags as unknown as Record<string, unknown>;
+    } catch (error) {
+      metadataError = error instanceof Error ? error.message : '读取 EXIF 失败';
+      reportPhotoImportStage(context, 'warning', filePath, metadataError);
+    }
+
+    const date = pickCapturedDate(tagRecord, stats.birthtime);
+    const gpsInfo = pickGps(tagRecord);
+    const locationInfo = pickLocationText(tagRecord);
+    let preview: { dataUrl: string; width: number | null; height: number | null } | null = null;
+    let previewError: string | undefined;
+
+    reportPhotoImportStage(context, 'preview', filePath, '生成预览图并读取图片尺寸');
+    try {
+      preview = await withTimeout(
+        createPreview(filePath),
+        PREVIEW_TIMEOUT_MS,
+        `生成预览超时（超过 ${Math.round(PREVIEW_TIMEOUT_MS / 1000)} 秒）`
+      );
+    } catch (error) {
+      previewError = error instanceof Error ? error.message : '无法生成预览';
+      reportPhotoImportStage(context, 'warning', filePath, previewError);
+    }
+
+    const error = [metadataError, previewError].filter(Boolean).join('；') || undefined;
+    const status = metadataError ? 'metadata-error' : preview ? 'ready' : 'preview-error';
+
+    const photo: PhotoRecord = {
       id: `${filePath}-${stats.size}-${stats.mtimeMs}`,
       path: filePath,
       fileName,
       extension,
+      fileSize: stats.size,
+      createdAt: stats.birthtime.toISOString(),
+      modifiedAt: stats.mtime.toISOString(),
       capturedAt: date.value,
       capturedAtSource: date.source,
-      gps,
-      city: null,
-      address: null,
+      gps: gpsInfo?.point ?? null,
+      gpsSource: gpsInfo?.source ?? null,
+      city: locationInfo.city,
+      address: locationInfo.address,
+      locationSource: locationInfo.source,
       previewDataUrl: preview?.dataUrl ?? null,
       width: preview?.width ?? null,
       height: preview?.height ?? null,
       adjustments: DEFAULT_ADJUSTMENTS,
-      status: preview ? 'ready' : 'preview-error',
-      error: preview ? undefined : '无法生成预览，但仍可尝试打印。'
+      status,
+      error: error ?? (preview ? undefined : '无法生成预览，但仍可尝试打印。')
     };
+
+    reportPhotoImportStage(
+      context,
+      'done',
+      filePath,
+      photo.status === 'ready' ? '照片信息读取完成' : photo.error
+    );
+
+    return photo;
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取元数据失败';
+    reportPhotoImportStage(context, 'error', filePath, message);
 
     return {
       id: `${filePath}-${Date.now()}`,
       path: filePath,
       fileName,
       extension,
+      fileSize: null,
+      createdAt: null,
+      modifiedAt: null,
       capturedAt: null,
       capturedAtSource: 'unknown',
       gps: null,
+      gpsSource: null,
       city: null,
       address: null,
+      locationSource: null,
       previewDataUrl: null,
       width: null,
       height: null,
@@ -297,13 +448,240 @@ function normalizeDate(value: unknown): string | null {
   return null;
 }
 
-function pickGps(tags: Record<string, unknown>): GpsPoint | null {
-  const lat = Number(tags.GPSLatitude);
-  const lon = Number(tags.GPSLongitude);
-  if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    return { lat, lon };
+function pickGps(tags: Record<string, unknown>): { point: GpsPoint; source: string } | null {
+  const direct = parseGpsPair(tags.GPSLatitude, tags.GPSLongitude, tags.GPSLatitudeRef, tags.GPSLongitudeRef);
+  if (direct) return { point: direct, source: 'GPSLatitude/GPSLongitude' };
+
+  const candidateKeys = [
+    'GPSPosition',
+    'GPSCoordinates',
+    'GPSCoordinate',
+    'GPSLocation',
+    'Location',
+    'GeolocationPosition',
+    'Composite:GPSPosition',
+    'Composite:GPSLatitude',
+    'Composite:GPSLongitude'
+  ];
+
+  for (const key of candidateKeys) {
+    const point = parseGpsValue(tags[key]);
+    if (point) return { point, source: key };
   }
+
+  const nestedKeys = ['LocationCreated', 'LocationShown', 'XMP:LocationCreated', 'XMP:LocationShown'];
+  for (const key of nestedKeys) {
+    const point = parseNestedGps(tags[key]);
+    if (point) return { point, source: key };
+  }
+
+  const fallback = pickGpsFromNamedFields(tags);
+  if (fallback) return fallback;
+
   return null;
+}
+
+function pickGpsFromNamedFields(tags: Record<string, unknown>): { point: GpsPoint; source: string } | null {
+  const entries = Object.entries(tags);
+  const latEntry = entries.find(([key]) => /(?:^|[:_])(?:gps)?lat(?:itude)?$/i.test(key) || /gps.*latitude/i.test(key));
+  const lonEntry = entries.find(([key]) => /(?:^|[:_])(?:gps)?lon(?:gitude)?$/i.test(key) || /gps.*longitude/i.test(key));
+  if (!latEntry || !lonEntry) return null;
+
+  const point = parseGpsPair(latEntry[1], lonEntry[1]);
+  return point ? { point, source: `${latEntry[0]}/${lonEntry[0]}` } : null;
+}
+
+function parseGpsPair(latValue: unknown, lonValue: unknown, latRef?: unknown, lonRef?: unknown): GpsPoint | null {
+  const lat = parseCoordinate(latValue, latRef);
+  const lon = parseCoordinate(lonValue, lonRef);
+  return normalizeGpsPoint(lat, lon);
+}
+
+function parseGpsValue(value: unknown): GpsPoint | null {
+  if (!value) return null;
+
+  if (Array.isArray(value) && value.length >= 2) {
+    return parseGpsPair(value[0], value[1]);
+  }
+
+  if (typeof value === 'object') {
+    return parseNestedGps(value);
+  }
+
+  const text = String(value).trim();
+  if (!text) return null;
+
+  const directionalParts = text.match(/[+-]?\d+(?:\.\d+)?(?:\D+[+-]?\d+(?:\.\d+)?){0,2}\s*[NSWE]/gi);
+  if (directionalParts && directionalParts.length >= 2) {
+    const point = parseGpsPair(directionalParts[0], directionalParts[1]);
+    if (point) return point;
+  }
+
+  const commaParts = text.split(',').map((part) => part.trim()).filter(Boolean);
+  if (commaParts.length >= 2) {
+    const point = parseGpsPair(commaParts[0], commaParts[1]);
+    if (point) return point;
+  }
+
+  const decimalMatches = text.match(/[+-]?\d+(?:\.\d+)?/g);
+  if (decimalMatches && decimalMatches.length >= 2 && /[NSWE]/i.test(text)) {
+    const latSegment = text.slice(0, text.toUpperCase().search(/[EW]/));
+    const lonSegment = text.slice(text.toUpperCase().search(/[EW]/));
+    const point = parseGpsPair(latSegment, lonSegment);
+    if (point) return point;
+  }
+
+  if (decimalMatches && decimalMatches.length === 2) {
+    return normalizeGpsPoint(Number(decimalMatches[0]), Number(decimalMatches[1]));
+  }
+
+  return null;
+}
+
+function parseNestedGps(value: unknown): GpsPoint | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  return (
+    parseGpsPair(record.GPSLatitude, record.GPSLongitude, record.GPSLatitudeRef, record.GPSLongitudeRef) ??
+    parseGpsPair(record.Latitude, record.Longitude, record.LatitudeRef, record.LongitudeRef) ??
+    parseGpsPair(record.lat, record.lon) ??
+    parseGpsPair(record.latitude, record.longitude) ??
+    parseGpsValue(record.GPSPosition) ??
+    parseGpsValue(record.GPSCoordinates)
+  );
+}
+
+function parseCoordinate(value: unknown, ref?: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return applyCoordinateRef(value, ref);
+
+  const text = String(value).trim();
+  if (!text) return null;
+  const numbers = text.match(/[+-]?\d+(?:\.\d+)?/g)?.map(Number).filter(Number.isFinite) ?? [];
+  if (numbers.length === 0) return null;
+
+  let coordinate = numbers[0];
+  if (numbers.length >= 3 && /deg|°|'|"|min|sec/i.test(text)) {
+    coordinate = numbers[0] + numbers[1] / 60 + numbers[2] / 3600;
+  } else if (numbers.length >= 2 && /deg|°/i.test(text)) {
+    coordinate = numbers[0] + numbers[1] / 60;
+  }
+
+  return applyCoordinateRef(coordinate, ref ?? text);
+}
+
+function applyCoordinateRef(value: number, ref?: unknown): number {
+  const refText = String(ref ?? '').toUpperCase();
+  if (refText.includes('S') || refText.includes('W')) return -Math.abs(value);
+  return value;
+}
+
+function normalizeGpsPoint(lat: number | null, lon: number | null): GpsPoint | null {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat === null || lon === null) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  if (lat === 0 && lon === 0) return null;
+  return { lat, lon };
+}
+
+function pickLocationText(tags: Record<string, unknown>): { city: string | null; address: string | null; source: string | null } {
+  const directCity = pickFirstText(tags, [
+    'City',
+    'IPTC:City',
+    'XMP:City',
+    'LocationCreatedCity',
+    'LocationShownCity',
+    'LocationCreatedSublocation',
+    'LocationShownSublocation',
+    'Sub-location',
+    'SubLocation',
+    'Province-State',
+    'State',
+    'Province',
+    'Country-PrimaryLocationName',
+    'Country',
+    'CountryName'
+  ]);
+  const directAddress = pickFirstText(tags, [
+    'Location',
+    'XMP:Location',
+    'GPSAreaInformation',
+    'LocationCreatedName',
+    'LocationShownName',
+    'LocationCreatedSublocation',
+    'LocationShownSublocation',
+    'Sub-location',
+    'SubLocation',
+    'Caption-Abstract',
+    'Description',
+    'ImageDescription',
+    'UserComment',
+    'XPComment',
+    'XPSubject'
+  ]);
+
+  const nested = pickNestedLocation(tags);
+  const city = directCity?.value ?? nested.city;
+  const address = directAddress?.value ?? nested.address;
+  const source = [directCity?.key, directAddress?.key, nested.source].filter(Boolean).join('/') || null;
+  return { city, address, source };
+}
+
+function pickFirstText(tags: Record<string, unknown>, keys: string[]): { key: string; value: string } | null {
+  for (const key of keys) {
+    const value = normalizeText(tags[key]);
+    if (value) return { key, value };
+  }
+
+  const patterns = keys.map((key) => key.replace(/[^a-z0-9]/gi, '').toLowerCase());
+  for (const [key, raw] of Object.entries(tags)) {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (!patterns.some((pattern) => normalizedKey.includes(pattern))) continue;
+    const value = normalizeText(raw);
+    if (value) return { key, value };
+  }
+
+  return null;
+}
+
+function pickNestedLocation(tags: Record<string, unknown>): { city: string | null; address: string | null; source: string | null } {
+  const nestedKeys = ['LocationCreated', 'LocationShown', 'XMP:LocationCreated', 'XMP:LocationShown'];
+  for (const key of nestedKeys) {
+    const raw = tags[key];
+    if (!raw) continue;
+    const values = Array.isArray(raw) ? raw : [raw];
+    for (const value of values) {
+      if (!value || typeof value !== 'object') continue;
+      const record = value as Record<string, unknown>;
+      const city =
+        normalizeText(record.City) ??
+        normalizeText(record.Sublocation) ??
+        normalizeText(record.ProvinceState) ??
+        normalizeText(record.Province) ??
+        normalizeText(record.State) ??
+        normalizeText(record.CountryName) ??
+        normalizeText(record.Country);
+      const address =
+        normalizeText(record.Name) ??
+        normalizeText(record.Sublocation) ??
+        normalizeText(record.Location) ??
+        normalizeText(record.Address);
+      if (city || address) return { city, address, source: key };
+    }
+  }
+
+  return { city: null, address: null, source: null };
+}
+
+function normalizeText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeText(item)).find(Boolean) ?? null;
+  }
+  if (typeof value === 'object') return null;
+  const text = String(value).trim();
+  if (!text || text === '-' || text.toLowerCase() === 'unknown') return null;
+  return text;
 }
 
 async function createPreview(filePath: string): Promise<{ dataUrl: string; width: number | null; height: number | null } | null> {
@@ -506,11 +884,11 @@ async function generatePrintPdf(
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
   const font = await embedWatermarkFont(doc, watermark);
-  const paper = PAPER_SIZES[print.paper];
+  const addressFont = await embedWatermarkAddressFont(doc, watermark, font);
+  const paper = getPaperSizePt(print);
   const pageSize =
     print.orientation === 'portrait' ? [paper.width, paper.height] : [paper.height, paper.width];
   const margin = mmToPt(print.marginMm);
-  const color = hexToRgb(watermark.color);
   const failures: PrintFailure[] = [];
 
   for (let index = 0; index < photos.length; index += 1) {
@@ -556,12 +934,10 @@ async function generatePrintPdf(
         height: imageSize.height
       });
 
-      const text = renderWatermarkText(watermark.template, photo);
-      if (text.trim()) {
-        const lines = text.split('\n');
-        const lineHeight = watermark.fontSize * 1.22;
-        const maxLineWidth = Math.max(...lines.map((line) => font.widthOfTextAtSize(line, watermark.fontSize)));
-        const textHeight = lineHeight * lines.length;
+      const watermarkLines = renderWatermarkLines(watermark, photo, font, addressFont);
+      if (watermarkLines.length > 0) {
+        const maxLineWidth = Math.max(...watermarkLines.map((line) => line.width));
+        const textHeight = watermarkLines.reduce((sum, line) => sum + line.lineHeight, 0);
         const textPoint = getWatermarkPoint(
           watermark.position,
           page.getWidth(),
@@ -571,13 +947,27 @@ async function generatePrintPdf(
           mmToPt(watermark.marginMm)
         );
 
-        lines.forEach((line, lineIndex) => {
-          page.drawText(line, {
+        if (watermark.backgroundEnabled) {
+          const padding = Math.max(4, watermark.fontSize * 0.45);
+          page.drawRectangle({
+            x: textPoint.x - padding,
+            y: textPoint.y - padding * 0.7,
+            width: maxLineWidth + padding * 2,
+            height: textHeight + padding * 1.4,
+            color: rgb(0.08, 0.11, 0.14),
+            opacity: 0.42
+          });
+        }
+
+        let lineOffset = 0;
+        watermarkLines.forEach((line) => {
+          lineOffset += line.lineHeight;
+          page.drawText(line.text, {
             x: textPoint.x,
-            y: textPoint.y + textHeight - lineHeight * (lineIndex + 1),
-            size: watermark.fontSize,
-            font,
-            color: rgb(color.r, color.g, color.b),
+            y: textPoint.y + textHeight - lineOffset,
+            size: line.fontSize,
+            font: line.font,
+            color: rgb(line.color.r, line.color.g, line.color.b),
             opacity: watermark.opacity
           });
         });
@@ -621,7 +1011,7 @@ async function generatePrintPdf(
 async function generateCalibrationPdf(print: PrintSettings): Promise<string> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
-  const paper = PAPER_SIZES[print.paper];
+  const paper = getPaperSizePt(print);
   const pageSize =
     print.orientation === 'portrait' ? [paper.width, paper.height] : [paper.height, paper.width];
   const page = doc.addPage(pageSize as [number, number]);
@@ -700,6 +1090,23 @@ async function embedWatermarkFont(doc: PDFDocument, watermark: WatermarkSettings
   }
 
   return doc.embedFont(pickPdfFont(watermark.fontFamily));
+}
+
+async function embedWatermarkAddressFont(
+  doc: PDFDocument,
+  watermark: WatermarkSettings,
+  fallbackFont: Awaited<ReturnType<PDFDocument['embedFont']>>
+) {
+  if (watermark.addressFontPath) {
+    const bytes = await readFile(watermark.addressFontPath);
+    return doc.embedFont(bytes, { subset: true });
+  }
+
+  if (!watermark.addressFontFamily || watermark.addressFontFamily === watermark.fontFamily) {
+    return fallbackFont;
+  }
+
+  return doc.embedFont(pickPdfFont(watermark.addressFontFamily));
 }
 
 function pickPdfFont(fontFamily: string) {
@@ -859,6 +1266,17 @@ function getPhotoSizeMm(print: PrintSettings): { width: number; height: number }
   return PHOTO_SIZES_MM['4r'];
 }
 
+function getPaperSizePt(print: PrintSettings): { width: number; height: number } {
+  if (print.paper === 'custom') {
+    return {
+      width: mmToPt(clamp(print.customPaperWidthMm || 210, 20, 1200)),
+      height: mmToPt(clamp(print.customPaperHeightMm || 297, 20, 1200))
+    };
+  }
+
+  return PAPER_SIZES[print.paper] ?? PAPER_SIZES.a4;
+}
+
 function getCropRegion(
   width: number | undefined,
   height: number | undefined,
@@ -913,6 +1331,41 @@ function renderWatermarkText(template: string, photo: PhotoRecord): string {
     .trim();
 }
 
+type EmbeddedWatermarkFont = Awaited<ReturnType<PDFDocument['embedFont']>>;
+
+function renderWatermarkLines(
+  watermark: WatermarkSettings,
+  photo: PhotoRecord,
+  defaultFont: EmbeddedWatermarkFont,
+  addressFont: EmbeddedWatermarkFont
+): Array<{
+  text: string;
+  font: EmbeddedWatermarkFont;
+  fontSize: number;
+  lineHeight: number;
+  width: number;
+  color: { r: number; g: number; b: number };
+}> {
+  return watermark.template
+    .split('\n')
+    .map((templateLine) => {
+      const isAddressLine = /\{city\}|\{address\}/.test(templateLine);
+      const text = renderWatermarkText(templateLine, photo);
+      const font = isAddressLine ? addressFont : defaultFont;
+      const fontSize = isAddressLine ? watermark.addressFontSize : watermark.fontSize;
+      const color = hexToRgb(isAddressLine ? watermark.addressColor : watermark.color);
+      return {
+        text,
+        font,
+        fontSize,
+        lineHeight: fontSize * 1.22,
+        width: font.widthOfTextAtSize(text, fontSize),
+        color
+      };
+    })
+    .filter((line) => line.text.trim());
+}
+
 function formatDate(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
@@ -940,6 +1393,17 @@ function mmToPt(mm: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 setInterval(async () => {

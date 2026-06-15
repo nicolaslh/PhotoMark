@@ -37,6 +37,8 @@
   "build": {
     "appId": "com.nicolaslh.photomark",
     "productName": "PhotoMark",
+    "artifactName": "PhotoMark-${version}-${arch}.${ext}",
+    "executableName": "PhotoMark",
     "asar": true,
     "directories": {
       "output": "release"

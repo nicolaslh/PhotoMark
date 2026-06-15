@@ -3,6 +3,7 @@ import type {
   BatchProgressEvent,
   GeocodeSettings,
   GpsPoint,
+  ImportProgressEvent,
   PhotoRecord,
   PrintSettings,
   WatermarkSettings
@@ -27,6 +28,11 @@ contextBridge.exposeInMainWorld('photoPrint', {
     const listener = (_event: Electron.IpcRendererEvent, payload: BatchProgressEvent) => callback(payload);
     ipcRenderer.on('batch:progress', listener);
     return () => ipcRenderer.removeListener('batch:progress', listener);
+  },
+  onImportProgress: (callback: (event: ImportProgressEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: ImportProgressEvent) => callback(payload);
+    ipcRenderer.on('import:progress', listener);
+    return () => ipcRenderer.removeListener('import:progress', listener);
   },
   generateCalibrationPdf: (print: PrintSettings) => ipcRenderer.invoke('print:calibration-pdf', { print }),
   printCalibration: (print: PrintSettings) => ipcRenderer.invoke('print:calibration-start', { print }),

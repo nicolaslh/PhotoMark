@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
 import './styles.css';
-import type { PrinterSummary } from '../shared/types';
+import type { ImportProgressEvent, PrinterSummary } from '../shared/types';
 
 const defaultWatermark: WatermarkSettings = {
   template: '{date}\n{city}',
@@ -25,19 +25,26 @@ const defaultWatermark: WatermarkSettings = {
   fontPath: null,
   fontSize: 18,
   color: '#ffffff',
+  addressFontFamily: 'Helvetica',
+  addressFontPath: null,
+  addressFontSize: 18,
+  addressColor: '#ffffff',
   opacity: 0.92,
   position: 'bottom-left',
-  marginMm: 10
+  marginMm: 10,
+  backgroundEnabled: false
 };
 
 const defaultPrint: PrintSettings = {
   paper: 'a4',
   orientation: 'portrait',
   marginMm: 12,
-  fit: 'contain',
+  fit: 'adaptive',
   photoSize: 'fit-page',
   customPhotoWidthMm: 101.6,
   customPhotoHeightMm: 152.4,
+  customPaperWidthMm: 210,
+  customPaperHeightMm: 297,
   printerName: '',
   copies: 1,
   scalePercent: 100
@@ -78,9 +85,13 @@ function App(): JSX.Element {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [queue, setQueue] = useState<BatchQueueItem[]>([]);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [busyDetail, setBusyDetail] = useState<string | null>(null);
   const [lastPdf, setLastPdf] = useState<string | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
   const selectedFontId = watermark.fontPath ? `system:${watermark.fontPath}` : `standard:${watermark.fontFamily}`;
+  const selectedAddressFontId = watermark.addressFontPath
+    ? `system:${watermark.addressFontPath}`
+    : `standard:${watermark.addressFontFamily}`;
 
   const watermarkText = useMemo(
     () => (selectedPhoto ? renderWatermarkText(watermark.template, selectedPhoto) : ''),
@@ -100,7 +111,7 @@ function App(): JSX.Element {
   useEffect(() => {
     window.photoPrint.listFonts().then(setFonts).catch(() => undefined);
     refreshPrinters();
-    return window.photoPrint.onBatchProgress((event) => {
+    const removeBatchProgress = window.photoPrint.onBatchProgress((event) => {
       setQueue((current) =>
         current.map((item) =>
           item.photoId === event.photoId
@@ -109,6 +120,15 @@ function App(): JSX.Element {
         )
       );
     });
+    const removeImportProgress = window.photoPrint.onImportProgress((event) => {
+      setBusyLabel(formatImportProgressLabel(event));
+      setBusyDetail(formatImportProgressDetail(event));
+    });
+
+    return () => {
+      removeBatchProgress();
+      removeImportProgress();
+    };
   }, []);
 
   useEffect(() => {
@@ -120,22 +140,42 @@ function App(): JSX.Element {
   }, [templates]);
 
   async function handleImport(): Promise<void> {
-    setBusyLabel('正在读取照片信息');
+    setBusyLabel('等待选择照片');
+    setBusyDetail('可以选择单张或多张照片');
     try {
       const imported = await window.photoPrint.selectPhotos();
       acceptImportedPhotos(imported);
+      if (imported.length === 0) {
+        setBusyLabel('就绪');
+        setBusyDetail('没有选择照片');
+      }
+    } catch (error) {
+      setBusyLabel('导入照片失败');
+      setBusyDetail(error instanceof Error ? error.message : '读取照片时发生未知错误');
     } finally {
-      setBusyLabel(null);
+      setTimeout(() => {
+        setBusyLabel((current) => (current === '就绪' ? null : current));
+      }, 1200);
     }
   }
 
   async function handleImportFolder(): Promise<void> {
-    setBusyLabel('正在扫描照片文件夹');
+    setBusyLabel('等待选择照片文件夹');
+    setBusyDetail('会递归扫描支持的图片格式');
     try {
       const imported = await window.photoPrint.selectPhotoFolder();
       acceptImportedPhotos(imported);
+      if (imported.length === 0) {
+        setBusyLabel('就绪');
+        setBusyDetail('没有找到可导入的照片');
+      }
+    } catch (error) {
+      setBusyLabel('导入文件夹失败');
+      setBusyDetail(error instanceof Error ? error.message : '扫描或读取照片时发生未知错误');
     } finally {
-      setBusyLabel(null);
+      setTimeout(() => {
+        setBusyLabel((current) => (current === '就绪' ? null : current));
+      }, 1200);
     }
   }
 
@@ -150,24 +190,31 @@ function App(): JSX.Element {
     const withGps = targetPhotos.filter((photo) => photo.gps && !photo.city);
     if (withGps.length === 0) return;
 
-    setBusyLabel('正在解析城市信息');
-    for (const photo of withGps) {
+    setBusyLabel(`正在解析城市信息 0/${withGps.length}`);
+    setBusyDetail('等待地址服务返回结果');
+    for (let index = 0; index < withGps.length; index += 1) {
+      const photo = withGps[index];
+      setBusyLabel(`正在解析城市信息 ${index + 1}/${withGps.length}`);
+      setBusyDetail(photo.fileName);
       try {
         const result = await window.photoPrint.reverseGeocode(photo.gps!, geocode);
         setPhotos((current) =>
           current.map((item) =>
-            item.id === photo.id ? { ...item, city: result.city, address: result.address } : item
+            item.id === photo.id
+              ? { ...item, city: result.city, address: result.address, locationSource: `${geocode.provider} reverse geocode` }
+              : item
           )
         );
       } catch {
         setPhotos((current) =>
           current.map((item) =>
-            item.id === photo.id ? { ...item, city: '地址解析失败', address: null } : item
+            item.id === photo.id ? { ...item, city: '地址解析失败', address: null, locationSource: null } : item
           )
         );
       }
     }
-    setBusyLabel(null);
+    setBusyLabel('地址解析完成');
+    setBusyDetail(`${withGps.length} 张照片已处理`);
   }
 
   async function handleGeneratePdf(): Promise<void> {
@@ -190,6 +237,7 @@ function App(): JSX.Element {
       }))
     );
     setBusyLabel(mode === 'pdf' ? '正在生成打印 PDF' : '正在准备系统打印');
+    setBusyDetail(`${photos.length} 张照片等待处理`);
 
     try {
       const result =
@@ -199,11 +247,14 @@ function App(): JSX.Element {
       setLastPdf(result.pdfPath);
       if (result.failures.length > 0) {
         setBusyLabel(`完成，${result.failures.length} 张照片失败`);
+        setBusyDetail(`PDF 已生成：${result.pdfPath}`);
         return;
       }
       setBusyLabel('批量任务完成');
+      setBusyDetail(`PDF 已生成：${result.pdfPath}`);
     } catch (error) {
       setBusyLabel(error instanceof Error ? error.message : '批量任务失败');
+      setBusyDetail(null);
     } finally {
       setCurrentJobId(null);
     }
@@ -220,6 +271,7 @@ function App(): JSX.Element {
       )
     );
     setBusyLabel('正在取消任务');
+    setBusyDetail(currentJobId);
   }
 
   async function refreshPrinters(): Promise<void> {
@@ -233,21 +285,25 @@ function App(): JSX.Element {
 
   async function handleGenerateCalibrationPdf(): Promise<void> {
     setBusyLabel('正在生成校准页');
+    setBusyDetail('100mm 打印校准方框');
     try {
       const result = await window.photoPrint.generateCalibrationPdf(print);
       setLastPdf(result.pdfPath);
     } finally {
       setBusyLabel(null);
+      setBusyDetail(null);
     }
   }
 
   async function handlePrintCalibration(): Promise<void> {
     setBusyLabel('正在打印校准页');
+    setBusyDetail(print.printerName || '系统默认打印机');
     try {
       const result = await window.photoPrint.printCalibration(print);
       setLastPdf(result.pdfPath);
     } finally {
       setBusyLabel(null);
+      setBusyDetail(null);
     }
   }
 
@@ -260,7 +316,7 @@ function App(): JSX.Element {
   function applyTemplate(templateId: string): void {
     const template = templates.find((item) => item.id === templateId);
     if (!template) return;
-    setWatermark(template.watermark);
+    setWatermark({ ...defaultWatermark, ...template.watermark });
     setTemplateName(template.name);
   }
 
@@ -415,7 +471,7 @@ function App(): JSX.Element {
                   src={selectedPhoto.previewDataUrl}
                   alt={selectedPhoto.fileName}
                   style={{
-                    objectFit: print.fit === 'cover' ? 'cover' : 'contain',
+                    objectFit: print.fit === 'cover' || print.fit === 'adaptive' ? 'cover' : 'contain',
                     transform: `rotate(${selectedPhoto.adjustments.rotateDeg}deg)`,
                     filter: `brightness(${selectedPhoto.adjustments.brightness})`,
                     clipPath: cropToClipPath(selectedPhoto.adjustments.crop)
@@ -423,7 +479,7 @@ function App(): JSX.Element {
                 />
               </div>
               <div
-                className={`watermark watermark-${watermark.position}`}
+                className={`watermark watermark-${watermark.position} ${watermark.backgroundEnabled ? 'with-background' : ''}`}
                 style={{
                   color: watermark.color,
                   opacity: watermark.opacity,
@@ -431,8 +487,21 @@ function App(): JSX.Element {
                   fontSize: `${Math.max(12, watermark.fontSize)}px`
                 }}
               >
-                {watermarkText.split('\n').map((line) => (
-                  <span key={line}>{line}</span>
+                {renderWatermarkLines(watermark, selectedPhoto).map((line, index) => (
+                  <span
+                    key={`${line.text}-${index}`}
+                    style={
+                      line.kind === 'address'
+                        ? {
+                            color: watermark.addressColor,
+                            fontFamily: watermark.addressFontFamily,
+                            fontSize: `${Math.max(10, watermark.addressFontSize)}px`
+                          }
+                        : undefined
+                    }
+                  >
+                    {line.text}
+                  </span>
                 ))}
               </div>
               <span className="paper-label">
@@ -448,7 +517,10 @@ function App(): JSX.Element {
         </div>
 
         <div className="status-strip">
-          <span>{busyLabel ?? '就绪'}</span>
+          <span className="status-copy">
+            <strong>{busyLabel ?? '就绪'}</strong>
+            {busyDetail && <small>{busyDetail}</small>}
+          </span>
           {lastPdf && (
             <button className="link-button" onClick={() => window.photoPrint.openPath(lastPdf)}>
               打开最近生成的 PDF
@@ -541,6 +613,47 @@ function App(): JSX.Element {
               />
             </label>
           </div>
+          <h2>
+            <MapPin size={16} />
+            地址样式
+          </h2>
+          <label>
+            地址字体
+            <select
+              value={selectedAddressFontId}
+              onChange={(event) => {
+                const font = fonts.find((item) => item.id === event.target.value);
+                if (!font) return;
+                setWatermark({ ...watermark, addressFontFamily: font.family, addressFontPath: font.path });
+              }}
+            >
+              {fonts.map((font) => (
+                <option key={font.id} value={font.id}>
+                  {font.family}{font.source === 'standard' ? ' · 标准' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="field-grid">
+            <label>
+              地址字号
+              <input
+                type="number"
+                min="10"
+                max="72"
+                value={watermark.addressFontSize}
+                onChange={(event) => setWatermark({ ...watermark, addressFontSize: Number(event.target.value) })}
+              />
+            </label>
+            <label>
+              地址颜色
+              <input
+                type="color"
+                value={watermark.addressColor}
+                onChange={(event) => setWatermark({ ...watermark, addressColor: event.target.value })}
+              />
+            </label>
+          </div>
           <label>
             透明度
             <input
@@ -566,6 +679,14 @@ function App(): JSX.Element {
               <option value="top-right">右上</option>
               <option value="center">居中</option>
             </select>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={watermark.backgroundEnabled}
+              onChange={(event) => setWatermark({ ...watermark, backgroundEnabled: event.target.checked })}
+            />
+            水印背景
           </label>
         </section>
 
@@ -638,8 +759,15 @@ function App(): JSX.Element {
             <label>
               纸张
               <select value={print.paper} onChange={(event) => setPrint({ ...print, paper: event.target.value as PrintSettings['paper'] })}>
+                <option value="a3">A3</option>
                 <option value="a4">A4</option>
+                <option value="a5">A5</option>
                 <option value="letter">Letter</option>
+                <option value="legal">Legal</option>
+                <option value="photo-4r">4R 相纸</option>
+                <option value="photo-5r">5R 相纸</option>
+                <option value="photo-6r">6R 相纸</option>
+                <option value="custom">自定义纸张</option>
               </select>
             </label>
             <label>
@@ -655,6 +783,32 @@ function App(): JSX.Element {
               </select>
             </label>
           </div>
+          {print.paper === 'custom' && (
+            <div className="field-grid">
+              <label>
+                纸宽 mm
+                <input
+                  type="number"
+                  min="20"
+                  max="1200"
+                  step="0.1"
+                  value={print.customPaperWidthMm}
+                  onChange={(event) => setPrint({ ...print, customPaperWidthMm: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                纸高 mm
+                <input
+                  type="number"
+                  min="20"
+                  max="1200"
+                  step="0.1"
+                  value={print.customPaperHeightMm}
+                  onChange={(event) => setPrint({ ...print, customPaperHeightMm: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+          )}
           <label>
             照片尺寸
             <select
@@ -662,9 +816,9 @@ function App(): JSX.Element {
               onChange={(event) => setPrint({ ...print, photoSize: event.target.value as PrintSettings['photoSize'] })}
             >
               <option value="fit-page">适应可打印区域</option>
-              <option value="4r">4R · 4 x 6 in</option>
-              <option value="5r">5R · 5 x 7 in</option>
-              <option value="6r">6R · 6 x 8 in</option>
+              <option value="4r">4R 相纸 · 4 x 6 in</option>
+              <option value="5r">5R 相纸 · 5 x 7 in</option>
+              <option value="6r">6R 相纸 · 6 x 8 in</option>
               <option value="custom">自定义尺寸</option>
             </select>
           </label>
@@ -708,8 +862,9 @@ function App(): JSX.Element {
             <label>
               适配
               <select value={print.fit} onChange={(event) => setPrint({ ...print, fit: event.target.value as PrintSettings['fit'] })}>
-                <option value="contain">完整显示</option>
-                <option value="cover">填充裁切</option>
+                <option value="adaptive">自适应 · 基于相纸铺开不变形</option>
+                <option value="cover">基于相纸铺开 · 不变形</option>
+                <option value="contain">原始比例 · 完整显示</option>
               </select>
             </label>
           </div>
@@ -743,6 +898,14 @@ function App(): JSX.Element {
             <Calendar size={16} />
             当前照片
           </h2>
+          <div className="metadata-list">
+            {buildPhotoMetadataRows(selectedPhoto).map((row) => (
+              <div className="metadata-row" key={row.label}>
+                <span>{row.label}</span>
+                <strong title={row.value}>{row.value}</strong>
+              </div>
+            ))}
+          </div>
           <label>
             拍摄时间
             <input
@@ -858,6 +1021,20 @@ function renderWatermarkText(template: string, photo: PhotoRecord): string {
     .trim();
 }
 
+function renderWatermarkLines(
+  watermark: WatermarkSettings,
+  photo: PhotoRecord | null
+): Array<{ text: string; kind: 'default' | 'address' }> {
+  if (!photo) return [];
+  return watermark.template
+    .split('\n')
+    .map((templateLine) => ({
+      text: renderWatermarkText(templateLine, photo),
+      kind: /\{city\}|\{address\}/.test(templateLine) ? ('address' as const) : ('default' as const)
+    }))
+    .filter((line) => line.text.trim());
+}
+
 function formatDate(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
@@ -892,7 +1069,7 @@ function cropSideLabel(side: keyof PhotoRecord['adjustments']['crop']): string {
 }
 
 function getPaperSize(print: PrintSettings): { width: number; height: number } {
-  const base = print.paper === 'letter' ? { width: 612, height: 792 } : { width: 595, height: 842 };
+  const base = getPaperSizeBase(print);
   return print.orientation === 'portrait' ? base : { width: base.height, height: base.width };
 }
 
@@ -918,8 +1095,30 @@ function getPhotoAreaStyle(print: PrintSettings, photo: PhotoRecord | null): Rea
 }
 
 function getPaperSizeMm(print: PrintSettings): { width: number; height: number } {
-  const base = print.paper === 'letter' ? { width: 215.9, height: 279.4 } : { width: 210, height: 297 };
+  const base = getPaperSizeBaseMm(print);
   return print.orientation === 'portrait' ? base : { width: base.height, height: base.width };
+}
+
+function getPaperSizeBase(print: PrintSettings): { width: number; height: number } {
+  const mm = getPaperSizeBaseMm(print);
+  return { width: mm.width * 2.834645669, height: mm.height * 2.834645669 };
+}
+
+function getPaperSizeBaseMm(print: PrintSettings): { width: number; height: number } {
+  if (print.paper === 'a3') return { width: 297, height: 420 };
+  if (print.paper === 'a5') return { width: 148, height: 210 };
+  if (print.paper === 'letter') return { width: 215.9, height: 279.4 };
+  if (print.paper === 'legal') return { width: 215.9, height: 355.6 };
+  if (print.paper === 'photo-4r') return { width: 101.6, height: 152.4 };
+  if (print.paper === 'photo-5r') return { width: 127, height: 177.8 };
+  if (print.paper === 'photo-6r') return { width: 152.4, height: 203.2 };
+  if (print.paper === 'custom') {
+    return {
+      width: Math.max(20, print.customPaperWidthMm || 210),
+      height: Math.max(20, print.customPaperHeightMm || 297)
+    };
+  }
+  return { width: 210, height: 297 };
 }
 
 function getPhotoSizeMm(print: PrintSettings): { width: number; height: number } {
@@ -947,6 +1146,80 @@ function loadWatermarkTemplates(): SavedWatermarkTemplate[] {
   } catch {
     return [];
   }
+}
+
+function buildPhotoMetadataRows(photo: PhotoRecord | null): Array<{ label: string; value: string }> {
+  if (!photo) {
+    return [{ label: '读取状态', value: '未选择照片' }];
+  }
+
+  return [
+    { label: '读取状态', value: formatPhotoStatus(photo) },
+    { label: '文件格式', value: photo.extension ? photo.extension.toUpperCase() : '未知' },
+    { label: '文件大小', value: formatFileSize(photo.fileSize) },
+    { label: '图片尺寸', value: formatImageSize(photo.width, photo.height) },
+    { label: '拍摄时间来源', value: formatCapturedAtSource(photo.capturedAtSource) },
+    { label: 'GPS 坐标', value: formatGps(photo.gps) },
+    { label: 'GPS 来源', value: photo.gpsSource ?? '未读取到' },
+    { label: '地址来源', value: photo.locationSource ?? '未读取到' },
+    { label: '文件创建时间', value: photo.createdAt ? formatDate(photo.createdAt) : '未读取到' },
+    { label: '文件修改时间', value: photo.modifiedAt ? formatDate(photo.modifiedAt) : '未读取到' },
+    { label: '文件路径', value: photo.path },
+    ...(photo.error ? [{ label: '读取提示', value: photo.error }] : [])
+  ];
+}
+
+function formatPhotoStatus(photo: PhotoRecord): string {
+  if (photo.status === 'ready') return '已读取元数据和预览';
+  if (photo.status === 'preview-error') return '元数据已读取，预览生成失败';
+  return '元数据读取失败';
+}
+
+function formatFileSize(bytes: number | null): string {
+  if (!bytes || bytes < 0) return '未读取到';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatImageSize(width: number | null, height: number | null): string {
+  if (!width || !height) return '未读取到';
+  return `${width} x ${height} px`;
+}
+
+function formatCapturedAtSource(source: string): string {
+  if (source === 'DateTimeOriginal') return 'EXIF DateTimeOriginal';
+  if (source === 'CreateDate') return 'EXIF CreateDate';
+  if (source === 'ModifyDate') return 'EXIF ModifyDate';
+  if (source === 'FileCreateDate') return 'EXIF FileCreateDate';
+  if (source === 'file-birthtime') return '文件创建时间兜底';
+  if (source === 'manual') return '手动修改';
+  return source || '未知';
+}
+
+function formatGps(gps: PhotoRecord['gps']): string {
+  if (!gps) return '未读取到';
+  return `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}`;
+}
+
+function formatImportProgressLabel(event: ImportProgressEvent): string {
+  const suffix = event.total > 0 ? ` ${event.index}/${event.total}` : '';
+  if (event.stage === 'dialog') return event.message ?? '等待选择照片';
+  if (event.stage === 'scanning') return event.message ?? '正在扫描照片文件夹';
+  if (event.stage === 'selected') return event.message ?? '已选择照片';
+  if (event.stage === 'metadata') return `正在读取照片信息${suffix}`;
+  if (event.stage === 'preview') return `正在生成预览图${suffix}`;
+  if (event.stage === 'warning') return `照片处理警告${suffix}`;
+  if (event.stage === 'error') return `照片处理失败${suffix}`;
+  if (event.stage === 'done') return event.message ?? `照片导入完成${suffix}`;
+  return event.message ?? '正在导入照片';
+}
+
+function formatImportProgressDetail(event: ImportProgressEvent): string | null {
+  const parts = [event.fileName, event.message].filter(Boolean);
+  if (parts.length > 0) return parts.join(' · ');
+  return event.path ?? null;
 }
 
 function formatQueueStatus(item: BatchQueueItem): string {
