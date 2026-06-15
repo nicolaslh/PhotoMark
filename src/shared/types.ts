@@ -85,7 +85,7 @@ export type GeocodeResult = {
 };
 
 export type GeocodeSettings = {
-  provider: 'amap' | 'osm';
+  provider: 'amap' | 'osm' | 'bigdatacloud';
   apiKey: string;
 };
 

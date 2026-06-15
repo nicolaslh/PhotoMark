@@ -702,6 +702,7 @@ function App(): JSX.Element {
               onChange={(event) => setGeocode({ ...geocode, provider: event.target.value as GeocodeSettings['provider'] })}
             >
               <option value="amap">高德地图 · 国内优先</option>
+              <option value="bigdatacloud">BigDataCloud · 免 Key 中文</option>
               <option value="osm">OpenStreetMap · 备用</option>
             </select>
           </label>

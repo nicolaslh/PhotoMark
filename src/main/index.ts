@@ -766,7 +766,12 @@ async function reverseGeocode(gps: GpsPoint, settings: GeocodeSettings): Promise
   const key = `${provider}:${gps.lat.toFixed(4)},${gps.lon.toFixed(4)}`;
   if (geocodeCache[key]) return geocodeCache[key];
 
-  const result = provider === 'amap' ? await reverseGeocodeAmap(gps, settings.apiKey) : await reverseGeocodeOsm(gps);
+  const result =
+    provider === 'amap'
+      ? await reverseGeocodeAmap(gps, settings.apiKey)
+      : provider === 'bigdatacloud'
+        ? await reverseGeocodeBigDataCloud(gps)
+        : await reverseGeocodeOsm(gps);
 
   geocodeCache[key] = result;
   await saveGeocodeCache();
@@ -778,7 +783,7 @@ async function reverseGeocodeAmap(gps: GpsPoint, apiKey: string): Promise<Geocod
     throw new Error('请填写高德地图 Web 服务 API Key');
   }
 
-  const location = await convertGpsToAmap(gps, apiKey);
+  const location = wgs84ToGcj02(gps);
   const url = new URL('https://restapi.amap.com/v3/geocode/regeo');
   url.searchParams.set('key', apiKey);
   url.searchParams.set('location', location);
@@ -816,22 +821,74 @@ async function reverseGeocodeAmap(gps: GpsPoint, apiKey: string): Promise<Geocod
   };
 }
 
-async function convertGpsToAmap(gps: GpsPoint, apiKey: string): Promise<string> {
-  const url = new URL('https://restapi.amap.com/v3/assistant/coordinate/convert');
-  url.searchParams.set('key', apiKey);
-  url.searchParams.set('locations', `${gps.lon},${gps.lat}`);
-  url.searchParams.set('coordsys', 'gps');
-  url.searchParams.set('output', 'json');
-
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`高德坐标转换失败：${response.status}`);
-
-  const data = (await response.json()) as { status?: string; info?: string; locations?: string };
-  if (data.status !== '1' || !data.locations) {
-    throw new Error(data.info || '高德坐标转换失败');
+// 本地将 WGS-84（EXIF 原始 GPS）转换为 GCJ-02（高德/国内坐标系），
+// 避免额外调用高德坐标转换接口（节省一半配额、减少一次网络往返）。
+function wgs84ToGcj02(gps: GpsPoint): string {
+  const { lat, lon } = gps;
+  if (isOutOfChina(lat, lon)) {
+    return `${lon.toFixed(6)},${lat.toFixed(6)}`;
   }
 
-  return data.locations.split(';')[0];
+  const a = 6378245.0; // 克拉索夫斯基椭球长半轴
+  const ee = 0.00669342162296594323; // 偏心率平方
+
+  let dLat = transformLat(lon - 105.0, lat - 35.0);
+  let dLon = transformLon(lon - 105.0, lat - 35.0);
+  const radLat = (lat / 180.0) * Math.PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - ee * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI);
+  dLon = (dLon * 180.0) / ((a / sqrtMagic) * Math.cos(radLat) * Math.PI);
+
+  return `${(lon + dLon).toFixed(6)},${(lat + dLat).toFixed(6)}`;
+}
+
+function isOutOfChina(lat: number, lon: number): boolean {
+  return !(lon > 73.66 && lon < 135.05 && lat > 3.86 && lat < 53.55);
+}
+
+function transformLat(x: number, y: number): number {
+  let ret =
+    -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin((y / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((160.0 * Math.sin((y / 12.0) * Math.PI) + 320 * Math.sin((y * Math.PI) / 30.0)) * 2.0) / 3.0;
+  return ret;
+}
+
+function transformLon(x: number, y: number): number {
+  let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0;
+  return ret;
+}
+
+// 免 key 兜底：BigDataCloud 客户端逆地理端点，免注册、支持中文，输入为 WGS-84。
+async function reverseGeocodeBigDataCloud(gps: GpsPoint): Promise<GeocodeResult> {
+  const url = new URL('https://api-bdc.net/data/reverse-geocode-client');
+  url.searchParams.set('latitude', String(gps.lat));
+  url.searchParams.set('longitude', String(gps.lon));
+  url.searchParams.set('localityLanguage', 'zh');
+
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`地址解析失败：${response.status}`);
+
+  const data = (await response.json()) as {
+    city?: string;
+    locality?: string;
+    principalSubdivision?: string;
+    countryName?: string;
+  };
+
+  const city = data.city || data.locality || data.principalSubdivision || null;
+  const parts = [data.countryName, data.principalSubdivision, data.city, data.locality].filter(
+    (part): part is string => Boolean(part)
+  );
+  const address = parts.length ? Array.from(new Set(parts)).join(' ') : null;
+
+  return { city, address };
 }
 
 async function reverseGeocodeOsm(gps: GpsPoint): Promise<GeocodeResult> {
