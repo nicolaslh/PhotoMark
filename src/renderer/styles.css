@@ -508,6 +508,25 @@ h2 {
   text-align: center;
 }
 
+.watermark-custom {
+  position: absolute;
+  text-align: left;
+}
+
+.watermark.draggable {
+  cursor: grab;
+  user-select: none;
+  transition: box-shadow 120ms ease;
+}
+
+.watermark.draggable:hover {
+  box-shadow: 0 0 0 2px rgba(15, 105, 104, 0.5);
+}
+
+.watermark.draggable:active {
+  cursor: grabbing;
+}
+
 .status-strip {
   display: flex;
   min-height: 50px;

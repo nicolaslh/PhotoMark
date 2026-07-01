@@ -32,7 +32,9 @@ const defaultWatermark: WatermarkSettings = {
   opacity: 0.92,
   position: 'bottom-left',
   marginMm: 10,
-  backgroundEnabled: false
+  backgroundEnabled: false,
+  customX: 10,
+  customY: 90
 };
 
 const defaultPrint: PrintSettings = {
@@ -68,6 +70,14 @@ type BatchQueueItem = {
   message?: string;
 };
 
+type WatermarkDragState = {
+  isDragging: boolean;
+  startX: number;
+  startY: number;
+  startXPercent: number;
+  startYPercent: number;
+};
+
 function App(): JSX.Element {
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -87,6 +97,8 @@ function App(): JSX.Element {
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [busyDetail, setBusyDetail] = useState<string | null>(null);
   const [lastPdf, setLastPdf] = useState<string | null>(null);
+  const [watermarkDrag, setWatermarkDrag] = useState<WatermarkDragState | null>(null);
+  const paperPreviewRef = React.useRef<HTMLDivElement | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
   const selectedFontId = watermark.fontPath ? `system:${watermark.fontPath}` : `standard:${watermark.fontFamily}`;
   const selectedAddressFontId = watermark.addressFontPath
@@ -359,6 +371,49 @@ function App(): JSX.Element {
     });
   }
 
+  function handleWatermarkMouseDown(event: React.MouseEvent<HTMLDivElement>): void {
+    if (watermark.position !== 'custom') return;
+    if (!paperPreviewRef.current) return;
+    
+    const rect = paperPreviewRef.current.getBoundingClientRect();
+    setWatermarkDrag({
+      isDragging: true,
+      startX: event.clientX,
+      startY: event.clientY,
+      startXPercent: watermark.customX ?? 10,
+      startYPercent: watermark.customY ?? 90
+    });
+  }
+
+  React.useEffect(() => {
+    if (!watermarkDrag?.isDragging) return;
+
+    function handleMouseMove(event: MouseEvent): void {
+      if (!paperPreviewRef.current) return;
+      const rect = paperPreviewRef.current.getBoundingClientRect();
+      const deltaX = event.clientX - watermarkDrag.startX;
+      const deltaY = event.clientY - watermarkDrag.startY;
+      const xPercent = Math.max(0, Math.min(100, watermarkDrag.startXPercent + (deltaX / rect.width) * 100));
+      const yPercent = Math.max(0, Math.min(100, watermarkDrag.startYPercent + (deltaY / rect.height) * 100));
+      setWatermark((prev) => ({
+        ...prev,
+        customX: xPercent,
+        customY: yPercent
+      }));
+    }
+
+    function handleMouseUp(): void {
+      setWatermarkDrag(null);
+    }
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [watermarkDrag]);
+
   return (
     <main className="app-shell">
       <aside className="photo-rail">
@@ -460,6 +515,7 @@ function App(): JSX.Element {
         <div className="stage">
           {selectedPhoto?.previewDataUrl ? (
             <div
+              ref={paperPreviewRef}
               className="paper-preview"
               style={{
                 aspectRatio: `${paperSize.width} / ${paperSize.height}`,
@@ -479,13 +535,19 @@ function App(): JSX.Element {
                 />
               </div>
               <div
-                className={`watermark watermark-${watermark.position} ${watermark.backgroundEnabled ? 'with-background' : ''}`}
+                className={`watermark ${watermark.position === 'custom' ? 'watermark-custom' : `watermark-${watermark.position}`} ${watermark.backgroundEnabled ? 'with-background' : ''} ${watermark.position === 'custom' ? 'draggable' : ''}`}
                 style={{
                   color: watermark.color,
                   opacity: watermark.opacity,
                   fontFamily: watermark.fontFamily,
-                  fontSize: `${Math.max(12, watermark.fontSize)}px`
+                  fontSize: `${Math.max(12, watermark.fontSize)}px`,
+                  ...(watermark.position === 'custom' && {
+                    left: `${watermark.customX ?? 10}%`,
+                    top: `${watermark.customY ?? 90}%`,
+                    transform: 'translate(-50%, -50%)'
+                  })
                 }}
+                onMouseDown={handleWatermarkMouseDown}
               >
                 {renderWatermarkLines(watermark, selectedPhoto).map((line, index) => (
                   <span
@@ -678,8 +740,14 @@ function App(): JSX.Element {
               <option value="top-left">左上</option>
               <option value="top-right">右上</option>
               <option value="center">居中</option>
+              <option value="custom">自定义（可拖拽）</option>
             </select>
           </label>
+          {watermark.position === 'custom' && (
+            <div className="hint">
+              选择"自定义"后，可在预览区直接拖动水印调整位置。
+            </div>
+          )}
           <label className="checkbox-row">
             <input
               type="checkbox"
@@ -863,9 +931,9 @@ function App(): JSX.Element {
             <label>
               适配
               <select value={print.fit} onChange={(event) => setPrint({ ...print, fit: event.target.value as PrintSettings['fit'] })}>
-                <option value="adaptive">自适应 · 基于相纸铺开不变形</option>
-                <option value="cover">基于相纸铺开 · 不变形</option>
-                <option value="contain">原始比例 · 完整显示</option>
+                <option value="adaptive">自适应 · 完全铺开（可轻微变形）</option>
+                <option value="cover">基于相纸铺开 · 不变形（可能裁剪）</option>
+                <option value="contain">原始比例 · 完整显示（可能留白）</option>
               </select>
             </label>
           </div>

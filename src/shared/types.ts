@@ -44,7 +44,8 @@ export type WatermarkPosition =
   | 'top-right'
   | 'bottom-left'
   | 'bottom-right'
-  | 'center';
+  | 'center'
+  | 'custom';
 
 export type WatermarkSettings = {
   template: string;
@@ -60,6 +61,8 @@ export type WatermarkSettings = {
   position: WatermarkPosition;
   marginMm: number;
   backgroundEnabled: boolean;
+  customX?: number; // 自定义 X 位置 (0-100 百分比)
+  customY?: number; // 自定义 Y 位置 (0-100 百分比)
 };
 
 export type PaperSize = 'a3' | 'a4' | 'a5' | 'letter' | 'legal' | 'photo-4r' | 'photo-5r' | 'photo-6r' | 'custom';

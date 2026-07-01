@@ -1001,7 +1001,9 @@ async function generatePrintPdf(
           page.getHeight(),
           maxLineWidth,
           textHeight,
-          mmToPt(watermark.marginMm)
+          mmToPt(watermark.marginMm),
+          watermark.customX,
+          watermark.customY
         );
 
         if (watermark.backgroundEnabled) {
@@ -1259,15 +1261,61 @@ function fitRect(
   targetHeight: number,
   mode: PrintSettings['fit']
 ): { width: number; height: number } {
-  const scale =
-    mode === 'contain'
-      ? Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight)
-      : Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  if (mode === 'contain') {
+    // 完整显示，保持比例，可能有留白
+    const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+    return {
+      width: sourceWidth * scale,
+      height: sourceHeight * scale
+    };
+  }
 
-  return {
-    width: sourceWidth * scale,
-    height: sourceHeight * scale
-  };
+  if (mode === 'cover') {
+    // 填满区域，保持比例，可能裁剪
+    const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+    return {
+      width: sourceWidth * scale,
+      height: sourceHeight * scale
+    };
+  }
+
+  // adaptive: 适当变形，完全铺满相纸
+  // 直接使用目标尺寸，但限制变形比例，避免严重失真
+  const scaleX = targetWidth / sourceWidth;
+  const scaleY = targetHeight / sourceHeight;
+  const avgScale = (scaleX + scaleY) / 2;
+
+  // 计算变形比例相对于平均缩放的比例
+  // 如果变形比例超过阈值，则限制变形
+  const maxStretchRatio = 1.15; // 最大允许 15% 变形
+  const stretchRatio = Math.max(scaleX, scaleY) / Math.min(scaleX, scaleY);
+
+  if (stretchRatio <= maxStretchRatio) {
+    // 变形在可接受范围内，完全铺满
+    return {
+      width: targetWidth,
+      height: targetHeight
+    };
+  }
+
+  // 变形过大，限制在阈值内，可能有轻微裁剪或留白
+  const limitedScaleX = avgScale * Math.sqrt(maxStretchRatio);
+  const limitedScaleY = avgScale / Math.sqrt(maxStretchRatio);
+
+  // 确保填满较小的一边
+  if (scaleX > scaleY) {
+    // 宽度方向需要更大缩放，以高度为基准
+    return {
+      width: sourceWidth * avgScale * maxStretchRatio,
+      height: targetHeight
+    };
+  } else {
+    // 高度方向需要更大缩放，以宽度为基准
+    return {
+      width: targetWidth,
+      height: sourceHeight * avgScale * maxStretchRatio
+    };
+  }
 }
 
 function getPhotoPrintBox(
@@ -1368,8 +1416,19 @@ function getWatermarkPoint(
   pageHeight: number,
   textWidth: number,
   textHeight: number,
-  margin: number
+  margin: number,
+  customX?: number,
+  customY?: number
 ): { x: number; y: number } {
+  if (position === 'custom') {
+    // customX 和 customY 是百分比 (0-100)，表示水印中心点位置
+    const xPercent = customX ?? 10;
+    const yPercent = customY ?? 90;
+    return {
+      x: (pageWidth * xPercent) / 100 - textWidth / 2,
+      y: pageHeight - (pageHeight * yPercent) / 100 - textHeight / 2
+    };
+  }
   if (position === 'top-left') return { x: margin, y: pageHeight - margin - textHeight };
   if (position === 'top-right') return { x: pageWidth - margin - textWidth, y: pageHeight - margin - textHeight };
   if (position === 'bottom-right') return { x: pageWidth - margin - textWidth, y: margin };
