@@ -451,6 +451,7 @@ h2 {
   display: flex;
   max-width: min(70%, 520px);
   flex-direction: column;
+  align-items: center;
   gap: 4px;
   padding: 0;
   border: 1px solid transparent;
@@ -459,6 +460,7 @@ h2 {
   line-height: 1.22;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  text-align: center;
 }
 
 .watermark.with-background {
@@ -485,8 +487,6 @@ h2 {
 .watermark-top-right {
   top: 18px;
   right: 18px;
-  align-items: flex-end;
-  text-align: right;
 }
 
 .watermark-bottom-left {
@@ -497,20 +497,16 @@ h2 {
 .watermark-bottom-right {
   right: 18px;
   bottom: 18px;
-  align-items: flex-end;
-  text-align: right;
 }
 
 .watermark-center {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  text-align: center;
 }
 
 .watermark-custom {
   position: absolute;
-  text-align: left;
 }
 
 .watermark.draggable {
