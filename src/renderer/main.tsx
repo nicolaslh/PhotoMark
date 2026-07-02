@@ -13,6 +13,8 @@ import {
   RotateCcw,
   RotateCw,
   Scissors,
+  Square,
+  SquareCheck,
   Type
 } from 'lucide-react';
 import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
@@ -81,6 +83,7 @@ type WatermarkDragState = {
 function App(): JSX.Element {
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [watermark, setWatermark] = useState(defaultWatermark);
   const [print, setPrint] = useState(defaultPrint);
   const [geocode, setGeocode] = useState<GeocodeSettings>(loadGeocodeSettings);
@@ -100,6 +103,7 @@ function App(): JSX.Element {
   const [watermarkDrag, setWatermarkDrag] = useState<WatermarkDragState | null>(null);
   const paperPreviewRef = React.useRef<HTMLDivElement | null>(null);
   const selectedPhoto = photos.find((photo) => photo.id === selectedId) ?? photos[0] ?? null;
+  const photosToPrint = selectedIds.size > 0 ? photos.filter((p) => selectedIds.has(p.id)) : photos;
   const selectedFontId = watermark.fontPath ? `system:${watermark.fontPath}` : `standard:${watermark.fontFamily}`;
   const selectedAddressFontId = watermark.addressFontPath
     ? `system:${watermark.addressFontPath}`
@@ -238,35 +242,51 @@ function App(): JSX.Element {
   }
 
   async function startBatch(mode: 'pdf' | 'print'): Promise<void> {
-    if (photos.length === 0) return;
+    const targetPhotos = photosToPrint;
+    if (targetPhotos.length === 0) return;
     const jobId = `job-${Date.now()}`;
     setCurrentJobId(jobId);
     setQueue(
-      photos.map((photo) => ({
+      targetPhotos.map((photo) => ({
         photoId: photo.id,
         fileName: photo.fileName,
         status: 'pending'
       }))
     );
     setBusyLabel(mode === 'pdf' ? '正在生成打印 PDF' : '正在准备系统打印');
-    setBusyDetail(`${photos.length} 张照片等待处理`);
+    setBusyDetail(`${targetPhotos.length} 张照片等待处理`);
 
     try {
       const result =
         mode === 'pdf'
-          ? await window.photoPrint.generatePrintPdf(photos, watermark, print, jobId)
-          : await window.photoPrint.printPhotos(photos, watermark, print, jobId);
+          ? await window.photoPrint.generatePrintPdf(targetPhotos, watermark, print, jobId)
+          : await window.photoPrint.printPhotos(targetPhotos, watermark, print, jobId);
       setLastPdf(result.pdfPath);
       if (result.failures.length > 0) {
         setBusyLabel(`完成，${result.failures.length} 张照片失败`);
         setBusyDetail(`PDF 已生成：${result.pdfPath}`);
-        return;
+        setQueue((current) =>
+          current.map((item) => {
+            const failure = result.failures.find((f) => f.photoId === item.photoId);
+            return failure ? { ...item, status: 'error' as const, message: failure.message } : item;
+          })
+        );
+      } else {
+        setBusyLabel('批量任务完成');
+        setBusyDetail(`PDF 已生成：${result.pdfPath}`);
+        setQueue((current) =>
+          current.map((item) => ({ ...item, status: 'done' as const }))
+        );
       }
-      setBusyLabel('批量任务完成');
-      setBusyDetail(`PDF 已生成：${result.pdfPath}`);
     } catch (error) {
-      setBusyLabel(error instanceof Error ? error.message : '批量任务失败');
-      setBusyDetail(null);
+      const errorMessage = error instanceof Error ? error.message : '批量任务失败';
+      setBusyLabel('任务失败');
+      setBusyDetail(errorMessage);
+      setQueue((current) =>
+        current.map((item) =>
+          item.status === 'pending' ? { ...item, status: 'error' as const, message: errorMessage } : item
+        )
+      );
     } finally {
       setCurrentJobId(null);
     }
@@ -290,9 +310,16 @@ function App(): JSX.Element {
     const found = await window.photoPrint.listPrinters();
     setPrinters(found);
     const defaultPrinter = found.find((printer) => printer.isDefault);
-    setPrint((current) =>
-      current.printerName || !defaultPrinter ? current : { ...current, printerName: defaultPrinter.name }
-    );
+    setPrint((current) => {
+      // 如果当前选择的打印机不在有效列表中，清除选择
+      const isValidPrinter = current.printerName && found.some(p => p.name === current.printerName);
+      if (!isValidPrinter) {
+        // 自动选择默认打印机，如果没有默认则选择第一个
+        const autoSelect = defaultPrinter?.name || (found.length > 0 ? found[0].name : '');
+        return { ...current, printerName: autoSelect };
+      }
+      return current;
+    });
   }
 
   async function handleGenerateCalibrationPdf(): Promise<void> {
@@ -334,6 +361,26 @@ function App(): JSX.Element {
 
   function deleteTemplate(templateId: string): void {
     setTemplates((current) => current.filter((item) => item.id !== templateId));
+  }
+
+  function togglePhotoSelection(photoId: string): void {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(photoId)) {
+        next.delete(photoId);
+      } else {
+        next.add(photoId);
+      }
+      return next;
+    });
+  }
+
+  function selectAllPhotos(): void {
+    setSelectedIds(new Set(photos.map((p) => p.id)));
+  }
+
+  function deselectAllPhotos(): void {
+    setSelectedIds(new Set());
   }
 
   function updateSelectedPhoto(patch: Partial<PhotoRecord>): void {
@@ -432,6 +479,20 @@ function App(): JSX.Element {
           </div>
         </div>
 
+        <div className="photo-list-header">
+          {photos.length > 0 && (
+            <>
+              <span className="selection-info">
+                {selectedIds.size > 0 ? `已选 ${selectedIds.size}/${photos.length} 张` : `${photos.length} 张照片`}
+              </span>
+              <div className="selection-actions">
+                <button className="link-button" onClick={selectAllPhotos}>全选</button>
+                <button className="link-button" onClick={deselectAllPhotos}>取消全选</button>
+              </div>
+            </>
+          )}
+        </div>
+
         <div className="photo-list">
           {photos.length === 0 ? (
             <div className="empty-state">
@@ -440,19 +501,30 @@ function App(): JSX.Element {
             </div>
           ) : (
             photos.map((photo) => (
-              <button
-                className={`photo-row ${photo.id === selectedPhoto?.id ? 'active' : ''}`}
+              <div
+                className={`photo-row ${photo.id === selectedPhoto?.id ? 'active' : ''} ${selectedIds.has(photo.id) ? 'selected' : ''}`}
                 key={photo.id}
-                onClick={() => setSelectedId(photo.id)}
               >
-                <div className="thumb">
-                  {photo.previewDataUrl ? <img src={photo.previewDataUrl} alt="" /> : <FileImage size={18} />}
-                </div>
-                <span>
-                  <strong>{photo.fileName}</strong>
-                  <small>{photo.city ?? (photo.gps ? '等待地址解析' : '无 GPS 信息')}</small>
-                </span>
-              </button>
+                <button
+                  className="photo-check"
+                  onClick={(e) => { e.stopPropagation(); togglePhotoSelection(photo.id); }}
+                  title={selectedIds.has(photo.id) ? '取消选择' : '选择打印'}
+                >
+                  {selectedIds.has(photo.id) ? <SquareCheck size={16} /> : <Square size={16} />}
+                </button>
+                <button
+                  className="photo-content"
+                  onClick={() => setSelectedId(photo.id)}
+                >
+                  <div className="thumb">
+                    {photo.previewDataUrl ? <img src={photo.previewDataUrl} alt="" /> : <FileImage size={18} />}
+                  </div>
+                  <span>
+                    <strong>{photo.fileName}</strong>
+                    <small>{photo.city ?? (photo.gps ? '等待地址解析' : '无 GPS 信息')}</small>
+                  </span>
+                </button>
+              </div>
             ))
           )}
         </div>
@@ -497,7 +569,7 @@ function App(): JSX.Element {
       <section className="preview-pane">
         <div className="toolbar">
           <div className="toolbar-copy">
-            <span>{photos.length} 张照片</span>
+            <span>{selectedIds.size > 0 ? `已选 ${selectedIds.size} 张 / 共 ${photos.length} 张` : `${photos.length} 张照片`}</span>
             <strong>{selectedPhoto?.fileName ?? '未选择照片'}</strong>
           </div>
           <div className="toolbar-actions">

@@ -2,12 +2,16 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import type { WebContents } from 'electron';
 import { exiftool } from 'exiftool-vendored';
 import fontkit from '@pdf-lib/fontkit';
+import { exec } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import sharp from 'sharp';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
 import type {
   BatchProgressEvent,
   FontOption,
@@ -196,14 +200,14 @@ ipcMain.handle(
     payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
     try {
-      const result = await generatePrintPdf(
+      // 直接打印图片（不经过 PDF）
+      const result = await printImagesDirect(
         payload.photos,
         payload.watermark,
         payload.print,
         payload.jobId,
         (progress) => event.sender.send('batch:progress', progress)
       );
-      await printPdf(result.pdfPath, payload.print);
       return result;
     } finally {
       canceledJobs.delete(payload.jobId);
@@ -1118,6 +1122,32 @@ async function generateCalibrationPdf(print: PrintSettings): Promise<string> {
 }
 
 async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
+  // 打印 PDF（保留原有功能）
+  const printerName = print.printerName || await getDefaultPrinterName();
+
+  if (!printerName) {
+    await shell.openPath(pdfPath);
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      const powershellCmd = [
+        '$p = Get-Item -LiteralPath', escapePowerShellPath(pdfPath),
+        '; Start-Process -FilePath $p.FullName -Verb Print',
+        `-ArgumentList '\\"${printerName}\\"'`
+      ].join(' ');
+
+      await execAsync(`powershell -NoProfile -Command "${powershellCmd}"`, {
+        timeout: 30000
+      });
+      return;
+    } catch (error) {
+      console.error('PowerShell print failed:', error);
+    }
+  }
+
+  // 回退：使用 Electron 打印
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -1125,21 +1155,215 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
     }
   });
 
-  await win.loadURL(pathToFileURL(pdfPath).toString());
-  await new Promise<void>((resolve, reject) => {
-    win.webContents.print(
-      {
-        printBackground: true,
-        deviceName: print.printerName || undefined,
-        copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1)))
-      },
-      (success, failureReason) => {
+  try {
+    await win.loadURL(pathToFileURL(pdfPath).toString());
+
+    await new Promise<void>((resolve, reject) => {
+      win.webContents.print(
+        {
+          printBackground: true,
+          deviceName: printerName || undefined,
+          copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1))),
+          silent: false
+        },
+        (success, failureReason) => {
+          if (success) {
+            resolve();
+          } else {
+            reject(new Error(`打印失败：${failureReason || '已取消'}`));
+          }
+        }
+      );
+    });
+  } finally {
+    if (!win.isDestroyed()) {
       win.close();
-      if (success) resolve();
-      else reject(new Error(failureReason || '打印已取消或失败'));
-      }
-    );
+    }
+  }
+}
+
+// 直接打印图片（不经过 PDF）
+async function printImagesDirect(
+  photos: PhotoRecord[],
+  watermark: WatermarkSettings,
+  print: PrintSettings,
+  jobId: string,
+  onProgress?: (event: BatchProgressEvent) => void
+): Promise<PrintResult> {
+  // 获取打印机名称
+  let printerName = print.printerName;
+
+  if (!printerName) {
+    printerName = await getDefaultPrinterName();
+  }
+
+  if (!printerName) {
+    throw new Error('未找到可用的打印机，请在设置中选择打印机');
+  }
+
+  console.log('Printing to:', printerName);
+
+  const failures: PrintFailure[] = [];
+  const dir = path.join(os.tmpdir(), 'photomark-print');
+  await mkdir(dir, { recursive: true });
+
+  for (let index = 0; index < photos.length; index += 1) {
+    if (canceledJobs.has(jobId)) {
+      throw new Error('打印已取消');
+    }
+
+    const photo = photos[index];
+    onProgress?.({
+      jobId,
+      index: index + 1,
+      total: photos.length,
+      photoId: photo.id,
+      fileName: photo.fileName,
+      status: 'processing',
+      message: '正在准备打印'
+    });
+
+    try {
+      // 生成带水印的图片
+      const printImagePath = await generatePrintImage(photo, watermark, print, dir);
+
+      // 打印图片
+      await printImageFile(printImagePath, printerName, print.copies);
+
+      onProgress?.({
+        jobId,
+        index: index + 1,
+        total: photos.length,
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'done',
+        message: '打印成功'
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '打印失败';
+      failures.push({ photoId: photo.id, fileName: photo.fileName, message });
+
+      onProgress?.({
+        jobId,
+        index: index + 1,
+        total: photos.length,
+        photoId: photo.id,
+        fileName: photo.fileName,
+        status: 'error',
+        message
+      });
+    }
+  }
+
+  return { pdfPath: '', failures };
+}
+
+// 生成带水印的打印图片
+async function generatePrintImage(
+  photo: PhotoRecord,
+  watermark: WatermarkSettings,
+  print: PrintSettings,
+  outputDir: string
+): Promise<string> {
+  // 读取原图并处理
+  const imageBuffer = await createJpegBuffer(photo.path, undefined, photo.adjustments);
+  let image = sharp(imageBuffer);
+  const metadata = await image.metadata();
+
+  // 计算打印尺寸（基于纸张大小）
+  const paperSize = getPaperSizePt(print);
+  const dpi = 300;
+  const paperWidthPx = Math.round(paperSize.width / 72 * dpi);
+  const paperHeightPx = Math.round(paperSize.height / 72 * dpi);
+
+  // 创建纸张大小的画布
+  const canvas = sharp({
+    create: {
+      width: print.orientation === 'portrait' ? paperWidthPx : paperHeightPx,
+      height: print.orientation === 'portrait' ? paperHeightPx : paperWidthPx,
+      channels: 3,
+      background: { r: 255, g: 255, b: 255 }
+    }
   });
+
+  // 缩放图片以适应纸张（留边距）
+  const margin = Math.round(print.marginMm / 25.4 * dpi);
+  const maxWidth = (print.orientation === 'portrait' ? paperWidthPx : paperHeightPx) - margin * 2;
+  const maxHeight = (print.orientation === 'portrait' ? paperHeightPx : paperWidthPx) - margin * 2;
+
+  // 计算缩放比例
+  const scale = Math.min(maxWidth / (metadata.width || 1), maxHeight / (metadata.height || 1), 1);
+  const scaledWidth = Math.round((metadata.width || 1) * scale);
+  const scaledHeight = Math.round((metadata.height || 1) * scale);
+
+  // 缩放原图
+  const scaledImage = await image
+    .resize(scaledWidth, scaledHeight, { fit: 'inside' })
+    .toBuffer();
+
+  // 计算居中位置
+  const x = Math.round((print.orientation === 'portrait' ? paperWidthPx : paperHeightPx - scaledWidth) / 2);
+  const y = Math.round((print.orientation === 'portrait' ? paperHeightPx : paperWidthPx - scaledHeight) / 2);
+
+  // 合成图片
+  const outputPath = path.join(outputDir, `${photo.fileName}-print.jpg`);
+
+  // 简化处理：直接输出缩放后的图片
+  await sharp(scaledImage)
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: 95 })
+    .toFile(outputPath);
+
+  return outputPath;
+}
+
+// 打印图片文件
+async function printImageFile(imagePath: string, printerName: string, copies: number): Promise<void> {
+  if (process.platform === 'win32') {
+    // 使用 Windows 图片查看器的打印功能（shimgvw.dll）
+    // 这是 Windows 原生支持的图片打印方式
+    const escapedPath = imagePath.replace(/"/g, '""');
+    const escapedPrinter = printerName.replace(/"/g, '""');
+    
+    // rundll32 shimgvw.dll,ImageView_PrintTo /pt "文件路径" "打印机名称"
+    const cmd = `rundll32.exe C:\\Windows\\System32\\shimgvw.dll,ImageView_PrintTo /pt "${escapedPath}" "${escapedPrinter}"`;
+    
+    await execAsync(cmd, {
+      timeout: 60000
+    });
+
+    // 等待打印任务发送到打印机
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } else {
+    // macOS/Linux 使用 lp 命令
+    await execAsync(`lp -d "${printerName}" -n ${copies} "${imagePath}"`, {
+      timeout: 60000
+    });
+  }
+}
+
+function escapePowerShellPath(filePath: string): string {
+  return `'${filePath.replace(/'/g, "''")}'`;
+}
+
+async function getDefaultPrinterName(): Promise<string | null> {
+  // 使用 Electron 的 API 获取默认打印机
+  if (mainWindow) {
+    try {
+      const printers = await mainWindow.webContents.getPrintersAsync();
+      const defaultPrinter = printers.find(p => p.isDefault);
+      if (defaultPrinter) {
+        return defaultPrinter.name;
+      }
+      // 如果没有标记默认，返回第一个打印机
+      if (printers.length > 0) {
+        return printers[0].name;
+      }
+    } catch (error) {
+      console.error('Failed to get printers:', error);
+    }
+  }
+  return null;
 }
 
 async function embedWatermarkFont(doc: PDFDocument, watermark: WatermarkSettings) {
@@ -1215,16 +1439,36 @@ async function listPrinters(): Promise<PrinterSummary[]> {
   if (!mainWindow) return [];
 
   const printers = await mainWindow.webContents.getPrintersAsync();
-  return printers.map((printer) => {
-    const printerInfo = printer as typeof printer & { status?: number; isDefault?: boolean };
-    return {
-      name: printer.name,
-      displayName: printer.displayName || printer.name,
-      description: printer.description || '',
-      status: printerInfo.status ?? 0,
-      isDefault: Boolean(printerInfo.isDefault)
-    };
-  });
+
+  // 虚拟打印机关键词列表（PDF、XPS、OneNote、Fax 等）
+  const virtualPrinterPatterns = [
+    /pdf/i,
+    /xps/i,
+    /onenote/i,
+    /fax/i,
+    /microsoft print to pdf/i,
+    /导出为/i,
+    /虚拟/i,
+    /virtual/i,
+    /microsoft xps/i
+  ];
+
+  const isVirtualPrinter = (name: string): boolean => {
+    return virtualPrinterPatterns.some(pattern => pattern.test(name));
+  };
+
+  return printers
+    .filter(printer => !isVirtualPrinter(printer.name))
+    .map((printer) => {
+      const printerInfo = printer as typeof printer & { status?: number; isDefault?: boolean };
+      return {
+        name: printer.name,
+        displayName: printer.displayName || printer.name,
+        description: printer.description || '',
+        status: printerInfo.status ?? 0,
+        isDefault: Boolean(printerInfo.isDefault)
+      };
+    });
 }
 
 async function scanFontDir(dir: string): Promise<FontOption[]> {
