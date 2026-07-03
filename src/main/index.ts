@@ -2,16 +2,11 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import type { WebContents } from 'electron';
 import { exiftool } from 'exiftool-vendored';
 import fontkit from '@pdf-lib/fontkit';
-import { exec } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import sharp from 'sharp';
-import { promisify } from 'node:util';
-
-const execAsync = promisify(exec);
 import type {
   BatchProgressEvent,
   FontOption,
@@ -200,12 +195,13 @@ ipcMain.handle(
     payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
     try {
-      // 直接打印图片（不经过 PDF）
-      const result = await printImagesDirect(
+      // 静默直接打印：合成整页图片后以 HTML 文档送打印（不弹对话框）
+      const result = await printPhotosViaHtml(
         payload.photos,
         payload.watermark,
         payload.print,
         payload.jobId,
+        true,
         (progress) => event.sender.send('batch:progress', progress)
       );
       return result;
@@ -222,20 +218,17 @@ ipcMain.handle(
     payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
     try {
-      // 最稳的路径：先生成多页 PDF（矢量、页面物理尺寸精确、已含水印/排版），
-      // 再通过系统打印对话框整批打印，只弹一次系统设置。
-      const result = await generatePrintPdf(
+      // 最稳的路径：合成整页图片后拼成 HTML 文档，通过系统打印对话框整批打印。
+      // 注意：Electron 的 webContents.print 无法打印其内置 PDF 阅读器（属 Chromium
+      // 扩展），因此这里用 HTML+图片而非 PDF。
+      const result = await printPhotosViaHtml(
         payload.photos,
         payload.watermark,
         payload.print,
         payload.jobId,
+        false,
         (progress) => event.sender.send('batch:progress', progress)
       );
-
-      if (result.pdfPath && !canceledJobs.has(payload.jobId)) {
-        await printPdfViaSystemDialog(result.pdfPath, payload.print);
-      }
-
       return result;
     } finally {
       canceledJobs.delete(payload.jobId);
@@ -253,8 +246,23 @@ ipcMain.handle('print:calibration-pdf', async (_event, payload: { print: PrintSe
 });
 
 ipcMain.handle('print:calibration-start', async (_event, payload: { print: PrintSettings }) => {
+  // 用 HTML（毫米精确的方框）通过系统打印对话框打印，避免打印 PDF 的限制
+  const dir = path.join(os.tmpdir(), 'photomark-print', `calibration-${Date.now()}`);
+  await mkdir(dir, { recursive: true });
+  try {
+    const htmlPath = path.join(dir, 'calibration.html');
+    await writeFile(htmlPath, buildCalibrationHtml(payload.print), 'utf-8');
+    await printHtmlFile(htmlPath, payload.print, {
+      silent: false,
+      deviceName: payload.print.printerName,
+      copies: 1
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 仍生成一份校准 PDF，便于用户留存/打开
   const pdfPath = await generateCalibrationPdf(payload.print);
-  await printPdf(pdfPath, payload.print);
   return { pdfPath, failures: [] };
 });
 
@@ -1158,40 +1166,27 @@ async function generateCalibrationPdf(print: PrintSettings): Promise<string> {
   return pdfPath;
 }
 
-async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
-  // 打印 PDF（保留原有功能）
-  const printerName = print.printerName || await getDefaultPrinterName();
+// 计算考虑方向后的页面尺寸（pt）
+function getPagePt(print: PrintSettings): { pageWpt: number; pageHpt: number } {
+  const paper = getPaperSizePt(print);
+  return print.orientation === 'portrait'
+    ? { pageWpt: paper.width, pageHpt: paper.height }
+    : { pageWpt: paper.height, pageHpt: paper.width };
+}
 
-  if (!printerName) {
-    await shell.openPath(pdfPath);
-    return;
-  }
+// 通过隐藏窗口加载 HTML 文档并调用系统打印。
+// 关键：只打印普通网页/图片内容，不打印 PDF（Electron 无法打印其内置 PDF 阅读器）。
+async function printHtmlFile(
+  htmlPath: string,
+  print: PrintSettings,
+  options: { silent: boolean; deviceName?: string | null; copies: number }
+): Promise<void> {
+  const { pageWpt, pageHpt } = getPagePt(print);
+  const ptToMicron = 25400 / 72;
 
-  if (process.platform === 'win32') {
-    try {
-      // 使用 PrintTo 谓词把 PDF 打到指定打印机（Print 谓词只会用默认打印机，
-      // 指定的打印机名会被忽略）。通过 -EncodedCommand 传递脚本，避免打印机名
-      // 含空格/引号时的多层转义问题。
-      const psScript = [
-        "$ErrorActionPreference = 'Stop'",
-        `Start-Process -FilePath ${escapePowerShellPath(pdfPath)} -Verb PrintTo -ArgumentList ${escapePowerShellPath(
-          printerName
-        )}`
-      ].join('; ');
-      const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-
-      await execAsync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
-        timeout: 30000
-      });
-      return;
-    } catch (error) {
-      console.error('PowerShell print failed:', error);
-    }
-  }
-
-  // 回退：使用 Electron 打印
   const win = new BrowserWindow({
     show: false,
+    // macOS 上系统打印面板需要依附父窗口
     parent: mainWindow ?? undefined,
     webPreferences: {
       sandbox: true
@@ -1199,70 +1194,22 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
   });
 
   try {
-    await win.loadURL(pathToFileURL(pdfPath).toString());
+    await win.loadFile(htmlPath);
     await waitForContentReady(win);
 
     await new Promise<void>((resolve, reject) => {
       win.webContents.print(
         {
+          silent: options.silent,
           printBackground: true,
-          deviceName: printerName || undefined,
-          copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1))),
-          silent: false
-        },
-        (success, failureReason) => {
-          const reason = (failureReason || '').toLowerCase();
-          if (success || reason.includes('cancel')) {
-            resolve();
-          } else {
-            reject(new Error(`打印失败：${failureReason || '已取消'}`));
+          deviceName: options.deviceName || undefined,
+          copies: Math.max(1, Math.min(99, Math.floor(options.copies || 1))),
+          margins: { marginType: 'none' },
+          landscape: false,
+          pageSize: {
+            width: Math.round(pageWpt * ptToMicron),
+            height: Math.round(pageHpt * ptToMicron)
           }
-        }
-      );
-    });
-  } finally {
-    if (!win.isDestroyed()) {
-      win.close();
-    }
-  }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// 等待隐藏窗口里的 PDF 阅读器渲染就绪，避免打印到空白/不全
-async function waitForContentReady(win: BrowserWindow, timeoutMs = 6000): Promise<void> {
-  const start = Date.now();
-  while (!win.isDestroyed() && win.webContents.isLoadingMainFrame() && Date.now() - start < timeoutMs) {
-    await delay(100);
-  }
-  // Chromium 内置 PDF 插件在 did-finish-load 之后仍需少量时间完成首次渲染
-  await delay(700);
-}
-
-// 通过系统打印对话框打印 PDF（弹出系统设置，使用系统打印机驱动）
-async function printPdfViaSystemDialog(pdfPath: string, print: PrintSettings): Promise<void> {
-  const win = new BrowserWindow({
-    show: false,
-    // 在 macOS 上，系统打印面板会依附到父窗口；不设置父窗口时隐藏窗口可能弹不出对话框
-    parent: mainWindow ?? undefined,
-    webPreferences: {
-      sandbox: true
-    }
-  });
-
-  try {
-    await win.loadURL(pathToFileURL(pdfPath).toString());
-    await waitForContentReady(win);
-
-    await new Promise<void>((resolve, reject) => {
-      win.webContents.print(
-        {
-          silent: false, // 弹出系统打印对话框，交由用户在系统设置中确认
-          printBackground: true,
-          deviceName: print.printerName || undefined,
-          copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1)))
         },
         (success, failureReason) => {
           const reason = (failureReason || '').toLowerCase();
@@ -1282,88 +1229,142 @@ async function printPdfViaSystemDialog(pdfPath: string, print: PrintSettings): P
   }
 }
 
-// 直接打印图片（不经过 PDF）
-async function printImagesDirect(
+// 把整页合成图片拼成一份 HTML 文档（每张一页，页面尺寸用 mm 精确定义）
+function buildPhotoPageHtml(imageFileNames: string[], print: PrintSettings): string {
+  const { pageWpt, pageHpt } = getPagePt(print);
+  const wmm = (pageWpt / 72) * 25.4;
+  const hmm = (pageHpt / 72) * 25.4;
+  const pages = imageFileNames
+    .map((name) => `<div class="page"><img src="${encodeURIComponent(name)}" /></div>`)
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+  @page { size: ${wmm}mm ${hmm}mm; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  .page { width: ${wmm}mm; height: ${hmm}mm; overflow: hidden; page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+  .page img { display: block; width: 100%; height: 100%; object-fit: fill; }
+  </style></head><body>${pages}</body></html>`;
+}
+
+// 校准页：毫米精确的 100mm 方框
+function buildCalibrationHtml(print: PrintSettings): string {
+  const { pageWpt, pageHpt } = getPagePt(print);
+  const wmm = (pageWpt / 72) * 25.4;
+  const hmm = (pageHpt / 72) * 25.4;
+  const marginMm = Math.max(0, print.marginMm || 0);
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+  @page { size: ${wmm}mm ${hmm}mm; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  .wrap { box-sizing: border-box; padding: ${marginMm}mm; font-family: -apple-system, "Segoe UI", sans-serif; }
+  .title { font-size: 14px; color: #1a2128; margin: 0 0 3mm; }
+  .box { width: 100mm; height: 100mm; border: 0.4mm solid #1f7070; box-sizing: border-box; }
+  .cap { font-size: 11px; color: #4d5a66; margin-top: 3mm; }
+  </style></head><body>
+  <div class="wrap">
+    <p class="title">PhotoMark print calibration</p>
+    <div class="box"></div>
+    <p class="cap">测量此方框：应为 100mm × 100mm。若不足或超出，请调整尺寸校准百分比。</p>
+  </div>
+  </body></html>`;
+}
+
+// 合成整页图片并以 HTML 文档打印（silent=true 静默；silent=false 弹系统对话框）
+async function printPhotosViaHtml(
   photos: PhotoRecord[],
   watermark: WatermarkSettings,
   print: PrintSettings,
   jobId: string,
+  silent: boolean,
   onProgress?: (event: BatchProgressEvent) => void
 ): Promise<PrintResult> {
-  // 获取打印机名称
   let printerName: string | null = print.printerName;
-
   if (!printerName) {
     printerName = await getDefaultPrinterName();
   }
-
-  if (!printerName) {
+  // 静默打印必须有明确打印机；弹系统对话框时可留空由用户在对话框选择
+  if (silent && !printerName) {
     throw new Error('未找到可用的打印机，请在设置中选择打印机');
   }
 
-  console.log('Printing to:', printerName);
-
-  const failures: PrintFailure[] = [];
   const dir = path.join(os.tmpdir(), 'photomark-print', jobId);
   await mkdir(dir, { recursive: true });
-
-  // 构建水印渲染上下文（字体测量 + 内嵌字体），整个任务复用一次
   const wmContext = await createWatermarkContext(watermark);
 
+  const failures: PrintFailure[] = [];
+  const generated: string[] = [];
+
   try {
-  for (let index = 0; index < photos.length; index += 1) {
-    if (canceledJobs.has(jobId)) {
-      throw new Error('打印已取消');
-    }
+    for (let index = 0; index < photos.length; index += 1) {
+      if (canceledJobs.has(jobId)) {
+        break;
+      }
 
-    const photo = photos[index];
-    onProgress?.({
-      jobId,
-      index: index + 1,
-      total: photos.length,
-      photoId: photo.id,
-      fileName: photo.fileName,
-      status: 'processing',
-      message: '正在准备打印'
-    });
-
-    try {
-      // 生成带水印的图片
-      const printImagePath = await generatePrintImage(photo, watermark, print, dir, wmContext);
-
-      // 打印图片
-      await printImageFile(printImagePath, printerName, print.copies, print);
-
+      const photo = photos[index];
       onProgress?.({
         jobId,
         index: index + 1,
         total: photos.length,
         photoId: photo.id,
         fileName: photo.fileName,
-        status: 'done',
-        message: '打印成功'
+        status: 'processing',
+        message: '正在合成打印图片'
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '打印失败';
-      failures.push({ photoId: photo.id, fileName: photo.fileName, message });
 
-      onProgress?.({
-        jobId,
-        index: index + 1,
-        total: photos.length,
-        photoId: photo.id,
-        fileName: photo.fileName,
-        status: 'error',
-        message
+      try {
+        const imagePath = await generatePrintImage(photo, watermark, print, dir, wmContext);
+        generated.push(path.basename(imagePath));
+        onProgress?.({
+          jobId,
+          index: index + 1,
+          total: photos.length,
+          photoId: photo.id,
+          fileName: photo.fileName,
+          status: 'done',
+          message: '已加入打印文档'
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '处理失败';
+        failures.push({ photoId: photo.id, fileName: photo.fileName, message });
+        onProgress?.({
+          jobId,
+          index: index + 1,
+          total: photos.length,
+          photoId: photo.id,
+          fileName: photo.fileName,
+          status: 'error',
+          message
+        });
+      }
+    }
+
+    if (generated.length > 0 && !canceledJobs.has(jobId)) {
+      const htmlPath = path.join(dir, 'print.html');
+      await writeFile(htmlPath, buildPhotoPageHtml(generated, print), 'utf-8');
+      await printHtmlFile(htmlPath, print, {
+        silent,
+        deviceName: printerName,
+        copies: print.copies
       });
     }
-  }
   } finally {
-    // 清理本次任务生成的临时图片
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 
   return { pdfPath: '', failures };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 等待隐藏窗口里的 PDF 阅读器渲染就绪，避免打印到空白/不全
+async function waitForContentReady(win: BrowserWindow, timeoutMs = 6000): Promise<void> {
+  const start = Date.now();
+  while (!win.isDestroyed() && win.webContents.isLoadingMainFrame() && Date.now() - start < timeoutMs) {
+    await delay(100);
+  }
+  // Chromium 内置 PDF 插件在 did-finish-load 之后仍需少量时间完成首次渲染
+  await delay(700);
 }
 
 // 打印时使用的分辨率
@@ -1623,68 +1624,6 @@ async function createWatermarkContext(watermark: WatermarkSettings): Promise<Wat
     addressFamily: addressFace.family,
     fontFaceCss
   };
-}
-
-// 打印图片文件（使用 Electron 原生打印）
-async function printImageFile(
-  imagePath: string, 
-  printerName: string, 
-  copies: number,
-  print: PrintSettings
-): Promise<void> {
-  // 创建隐藏窗口加载图片
-  const printWindow = new BrowserWindow({
-    show: false,
-    webPreferences: {
-      sandbox: false
-    }
-  });
-
-  try {
-    // 加载图片文件
-    await printWindow.loadURL(pathToFileURL(imagePath).toString());
-    await waitForContentReady(printWindow);
-
-    // 画布已是整页纸大小、且方向已在 generatePrintImage 中处理，
-    // 因此按同样的物理尺寸出纸、去掉页边距，保证 1:1 铺满不缩放。
-    const paper = getPaperSizePt(print);
-    const pageWpt = print.orientation === 'portrait' ? paper.width : paper.height;
-    const pageHpt = print.orientation === 'portrait' ? paper.height : paper.width;
-    const ptToMicron = 25400 / 72;
-
-    // 使用 Electron 打印 API（静默打印）
-    await new Promise<void>((resolve, reject) => {
-      printWindow.webContents.print(
-        {
-          silent: true,
-          printBackground: true,
-          deviceName: printerName,
-          copies: Math.max(1, Math.min(99, Math.floor(copies || 1))),
-          margins: { marginType: 'none' },
-          landscape: false,
-          pageSize: {
-            width: Math.round(pageWpt * ptToMicron),
-            height: Math.round(pageHpt * ptToMicron)
-          }
-        },
-        (success, failureReason) => {
-          if (success) {
-            resolve();
-          } else {
-            reject(new Error(`打印失败：${failureReason || '已取消'}`));
-          }
-        }
-      );
-    });
-  } finally {
-    if (!printWindow.isDestroyed()) {
-      printWindow.close();
-    }
-  }
-}
-
-function escapePowerShellPath(filePath: string): string {
-  return `'${filePath.replace(/'/g, "''")}'`;
 }
 
 async function getDefaultPrinterName(): Promise<string | null> {
