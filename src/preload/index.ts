@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('photoPrint', {
   ) => ipcRenderer.invoke('print:generate-pdf', { photos, watermark, print, jobId }),
   printPhotos: (photos: PhotoRecord[], watermark: WatermarkSettings, print: PrintSettings, jobId: string) =>
     ipcRenderer.invoke('print:start', { photos, watermark, print, jobId }),
+  printPhotosSystem: (photos: PhotoRecord[], watermark: WatermarkSettings, print: PrintSettings, jobId: string) =>
+    ipcRenderer.invoke('print:system', { photos, watermark, print, jobId }),
   cancelBatch: (jobId: string) => ipcRenderer.invoke('batch:cancel', { jobId }),
   onBatchProgress: (callback: (event: BatchProgressEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: BatchProgressEvent) => callback(payload);

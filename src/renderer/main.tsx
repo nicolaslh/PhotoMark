@@ -93,6 +93,7 @@ function App(): JSX.Element {
     { id: 'standard:Courier', family: 'Courier', path: null, source: 'standard' }
   ]);
   const [printers, setPrinters] = useState<PrinterSummary[]>([]);
+  const [useSystemDialog, setUseSystemDialog] = useState(true);
   const [templates, setTemplates] = useState<SavedWatermarkTemplate[]>(loadWatermarkTemplates);
   const [templateName, setTemplateName] = useState('默认水印');
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -238,10 +239,10 @@ function App(): JSX.Element {
   }
 
   async function handlePrint(): Promise<void> {
-    await startBatch('print');
+    await startBatch(useSystemDialog ? 'system' : 'print');
   }
 
-  async function startBatch(mode: 'pdf' | 'print'): Promise<void> {
+  async function startBatch(mode: 'pdf' | 'print' | 'system'): Promise<void> {
     const targetPhotos = photosToPrint;
     if (targetPhotos.length === 0) return;
     const jobId = `job-${Date.now()}`;
@@ -253,18 +254,34 @@ function App(): JSX.Element {
         status: 'pending'
       }))
     );
-    setBusyLabel(mode === 'pdf' ? '正在生成打印 PDF' : '正在准备系统打印');
+    setBusyLabel(
+      mode === 'pdf'
+        ? '正在生成打印 PDF'
+        : mode === 'system'
+          ? '正在生成 PDF 并调用系统打印'
+          : '正在静默直接打印'
+    );
     setBusyDetail(`${targetPhotos.length} 张照片等待处理`);
 
     try {
       const result =
         mode === 'pdf'
           ? await window.photoPrint.generatePrintPdf(targetPhotos, watermark, print, jobId)
-          : await window.photoPrint.printPhotos(targetPhotos, watermark, print, jobId);
+          : mode === 'system'
+            ? await window.photoPrint.printPhotosSystem(targetPhotos, watermark, print, jobId)
+            : await window.photoPrint.printPhotos(targetPhotos, watermark, print, jobId);
       setLastPdf(result.pdfPath);
+
+      const successDetail =
+        mode === 'system'
+          ? '已在系统打印对话框中提交，请按系统提示确认'
+          : mode === 'pdf'
+            ? `PDF 已生成：${result.pdfPath}`
+            : '已发送到打印机';
+
       if (result.failures.length > 0) {
         setBusyLabel(`完成，${result.failures.length} 张照片失败`);
-        setBusyDetail(`PDF 已生成：${result.pdfPath}`);
+        setBusyDetail(successDetail);
         setQueue((current) =>
           current.map((item) => {
             const failure = result.failures.find((f) => f.photoId === item.photoId);
@@ -272,11 +289,24 @@ function App(): JSX.Element {
           })
         );
       } else {
-        setBusyLabel('批量任务完成');
-        setBusyDetail(`PDF 已生成：${result.pdfPath}`);
-        setQueue((current) =>
-          current.map((item) => ({ ...item, status: 'done' as const }))
-        );
+        // 保留已取消/失败的条目状态，避免把取消后的批次错误地显示为“全部完成”
+        let canceledCount = 0;
+        setQueue((current) => {
+          canceledCount = current.filter((item) => item.status === 'canceled').length;
+          return current.map((item) =>
+            item.status === 'error' || item.status === 'canceled'
+              ? item
+              : { ...item, status: 'done' as const }
+          );
+        });
+
+        if (canceledCount > 0) {
+          setBusyLabel('任务已取消');
+          setBusyDetail(`${canceledCount} 张照片未打印`);
+        } else {
+          setBusyLabel(mode === 'system' ? '已提交系统打印' : '批量任务完成');
+          setBusyDetail(successDetail);
+        }
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '批量任务失败';
@@ -890,6 +920,19 @@ function App(): JSX.Element {
               />
             </label>
           </div>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={useSystemDialog}
+              onChange={(event) => setUseSystemDialog(event.target.checked)}
+            />
+            打印前弹出系统打印设置（推荐）
+          </label>
+          <p className="hint">
+            {useSystemDialog
+              ? '将整批照片生成一份 PDF 后调用系统打印对话框，可在系统中选择打印机与参数，尺寸最准确。'
+              : '直接静默打印到所选打印机，不弹出系统设置。'}
+          </p>
           <div className="button-row">
             <button className="text-button" onClick={refreshPrinters}>
               <RefreshCcw size={16} />

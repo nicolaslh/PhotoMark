@@ -32,6 +32,12 @@ declare global {
         print: PrintSettings,
         jobId: string
       ) => Promise<PrintResult>;
+      printPhotosSystem: (
+        photos: PhotoRecord[],
+        watermark: WatermarkSettings,
+        print: PrintSettings,
+        jobId: string
+      ) => Promise<PrintResult>;
       cancelBatch: (jobId: string) => Promise<void>;
       onBatchProgress: (callback: (event: BatchProgressEvent) => void) => () => void;
       onImportProgress: (callback: (event: ImportProgressEvent) => void) => () => void;

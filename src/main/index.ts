@@ -215,6 +215,34 @@ ipcMain.handle(
   }
 );
 
+ipcMain.handle(
+  'print:system',
+  async (
+    event,
+    payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
+  ) => {
+    try {
+      // 最稳的路径：先生成多页 PDF（矢量、页面物理尺寸精确、已含水印/排版），
+      // 再通过系统打印对话框整批打印，只弹一次系统设置。
+      const result = await generatePrintPdf(
+        payload.photos,
+        payload.watermark,
+        payload.print,
+        payload.jobId,
+        (progress) => event.sender.send('batch:progress', progress)
+      );
+
+      if (result.pdfPath && !canceledJobs.has(payload.jobId)) {
+        await printPdfViaSystemDialog(result.pdfPath, payload.print);
+      }
+
+      return result;
+    } finally {
+      canceledJobs.delete(payload.jobId);
+    }
+  }
+);
+
 ipcMain.handle('batch:cancel', async (_event, payload: { jobId: string }) => {
   canceledJobs.add(payload.jobId);
 });
@@ -957,7 +985,7 @@ async function generatePrintPdf(
     if (canceledJobs.has(jobId)) {
       onProgress?.({
         jobId,
-        index,
+        index: index + 1,
         total: photos.length,
         photoId: photo.id,
         fileName: photo.fileName,
@@ -969,7 +997,7 @@ async function generatePrintPdf(
 
     onProgress?.({
       jobId,
-      index,
+      index: index + 1,
       total: photos.length,
       photoId: photo.id,
       fileName: photo.fileName,
@@ -1038,7 +1066,7 @@ async function generatePrintPdf(
 
       onProgress?.({
         jobId,
-        index,
+        index: index + 1,
         total: photos.length,
         photoId: photo.id,
         fileName: photo.fileName,
@@ -1049,7 +1077,7 @@ async function generatePrintPdf(
       failures.push({ photoId: photo.id, fileName: photo.fileName, message });
       onProgress?.({
         jobId,
-        index,
+        index: index + 1,
         total: photos.length,
         photoId: photo.id,
         fileName: photo.fileName,
@@ -1066,6 +1094,15 @@ async function generatePrintPdf(
   const bytes = await doc.save();
   const dir = path.join(app.getPath('temp'), 'photo-print-assistant');
   await mkdir(dir, { recursive: true });
+
+  // 清理历史生成的打印 PDF，仅保留本次这份，避免临时目录无限累积
+  const existing = await readdir(dir).catch(() => [] as string[]);
+  await Promise.all(
+    existing
+      .filter((name) => /^photo-print-.*\.pdf$/i.test(name))
+      .map((name) => rm(path.join(dir, name), { force: true }).catch(() => undefined))
+  );
+
   const pdfPath = path.join(dir, `photo-print-${Date.now()}.pdf`);
   await writeFile(pdfPath, bytes);
   return { pdfPath, failures };
@@ -1155,6 +1192,7 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
   // 回退：使用 Electron 打印
   const win = new BrowserWindow({
     show: false,
+    parent: mainWindow ?? undefined,
     webPreferences: {
       sandbox: true
     }
@@ -1162,6 +1200,7 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
 
   try {
     await win.loadURL(pathToFileURL(pdfPath).toString());
+    await waitForContentReady(win);
 
     await new Promise<void>((resolve, reject) => {
       win.webContents.print(
@@ -1172,7 +1211,63 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
           silent: false
         },
         (success, failureReason) => {
-          if (success) {
+          const reason = (failureReason || '').toLowerCase();
+          if (success || reason.includes('cancel')) {
+            resolve();
+          } else {
+            reject(new Error(`打印失败：${failureReason || '已取消'}`));
+          }
+        }
+      );
+    });
+  } finally {
+    if (!win.isDestroyed()) {
+      win.close();
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 等待隐藏窗口里的 PDF 阅读器渲染就绪，避免打印到空白/不全
+async function waitForContentReady(win: BrowserWindow, timeoutMs = 6000): Promise<void> {
+  const start = Date.now();
+  while (!win.isDestroyed() && win.webContents.isLoadingMainFrame() && Date.now() - start < timeoutMs) {
+    await delay(100);
+  }
+  // Chromium 内置 PDF 插件在 did-finish-load 之后仍需少量时间完成首次渲染
+  await delay(700);
+}
+
+// 通过系统打印对话框打印 PDF（弹出系统设置，使用系统打印机驱动）
+async function printPdfViaSystemDialog(pdfPath: string, print: PrintSettings): Promise<void> {
+  const win = new BrowserWindow({
+    show: false,
+    // 在 macOS 上，系统打印面板会依附到父窗口；不设置父窗口时隐藏窗口可能弹不出对话框
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      sandbox: true
+    }
+  });
+
+  try {
+    await win.loadURL(pathToFileURL(pdfPath).toString());
+    await waitForContentReady(win);
+
+    await new Promise<void>((resolve, reject) => {
+      win.webContents.print(
+        {
+          silent: false, // 弹出系统打印对话框，交由用户在系统设置中确认
+          printBackground: true,
+          deviceName: print.printerName || undefined,
+          copies: Math.max(1, Math.min(99, Math.floor(print.copies || 1)))
+        },
+        (success, failureReason) => {
+          const reason = (failureReason || '').toLowerCase();
+          // 用户在系统对话框中取消不视为错误
+          if (success || reason.includes('cancel')) {
             resolve();
           } else {
             reject(new Error(`打印失败：${failureReason || '已取消'}`));
@@ -1548,6 +1643,14 @@ async function printImageFile(
   try {
     // 加载图片文件
     await printWindow.loadURL(pathToFileURL(imagePath).toString());
+    await waitForContentReady(printWindow);
+
+    // 画布已是整页纸大小、且方向已在 generatePrintImage 中处理，
+    // 因此按同样的物理尺寸出纸、去掉页边距，保证 1:1 铺满不缩放。
+    const paper = getPaperSizePt(print);
+    const pageWpt = print.orientation === 'portrait' ? paper.width : paper.height;
+    const pageHpt = print.orientation === 'portrait' ? paper.height : paper.width;
+    const ptToMicron = 25400 / 72;
 
     // 使用 Electron 打印 API（静默打印）
     await new Promise<void>((resolve, reject) => {
@@ -1556,7 +1659,13 @@ async function printImageFile(
           silent: true,
           printBackground: true,
           deviceName: printerName,
-          copies: Math.max(1, Math.min(99, Math.floor(copies || 1)))
+          copies: Math.max(1, Math.min(99, Math.floor(copies || 1))),
+          margins: { marginType: 'none' },
+          landscape: false,
+          pageSize: {
+            width: Math.round(pageWpt * ptToMicron),
+            height: Math.round(pageHpt * ptToMicron)
+          }
         },
         (success, failureReason) => {
           if (success) {
