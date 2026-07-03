@@ -1191,7 +1191,7 @@ async function printImagesDirect(
   onProgress?: (event: BatchProgressEvent) => void
 ): Promise<PrintResult> {
   // 获取打印机名称
-  let printerName = print.printerName;
+  let printerName: string | null = print.printerName;
 
   if (!printerName) {
     printerName = await getDefaultPrinterName();
@@ -1204,9 +1204,13 @@ async function printImagesDirect(
   console.log('Printing to:', printerName);
 
   const failures: PrintFailure[] = [];
-  const dir = path.join(os.tmpdir(), 'photomark-print');
+  const dir = path.join(os.tmpdir(), 'photomark-print', jobId);
   await mkdir(dir, { recursive: true });
 
+  // 构建水印渲染上下文（字体测量 + 内嵌字体），整个任务复用一次
+  const wmContext = await createWatermarkContext(watermark);
+
+  try {
   for (let index = 0; index < photos.length; index += 1) {
     if (canceledJobs.has(jobId)) {
       throw new Error('打印已取消');
@@ -1225,7 +1229,7 @@ async function printImagesDirect(
 
     try {
       // 生成带水印的图片
-      const printImagePath = await generatePrintImage(photo, watermark, print, dir);
+      const printImagePath = await generatePrintImage(photo, watermark, print, dir, wmContext);
 
       // 打印图片
       await printImageFile(printImagePath, printerName, print.copies, print);
@@ -1254,67 +1258,271 @@ async function printImagesDirect(
       });
     }
   }
+  } finally {
+    // 清理本次任务生成的临时图片
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 
   return { pdfPath: '', failures };
 }
 
-// 生成带水印的打印图片
+// 打印时使用的分辨率
+const PRINT_DPI = 300;
+
+type WatermarkRenderContext = {
+  defaultFont: EmbeddedWatermarkFont;
+  addressFont: EmbeddedWatermarkFont;
+  defaultFamily: string;
+  addressFamily: string;
+  fontFaceCss: string;
+};
+
+// 生成带水印、按纸张排版的打印图片
+// 该函数完整复刻 PDF 路径（generatePrintPdf）的排版逻辑：纸张尺寸、方向、
+// 边距、相纸尺寸盒、fit 模式、缩放比例与水印绘制，只是最终以位图输出而非 PDF。
 async function generatePrintImage(
   photo: PhotoRecord,
   watermark: WatermarkSettings,
   print: PrintSettings,
-  outputDir: string
+  outputDir: string,
+  wmContext: WatermarkRenderContext
 ): Promise<string> {
-  // 读取原图并处理
+  // 读取原图并处理（旋转/裁剪/亮度已在此应用）
   const imageBuffer = await createJpegBuffer(photo.path, undefined, photo.adjustments);
-  let image = sharp(imageBuffer);
-  const metadata = await image.metadata();
+  const metadata = await sharp(imageBuffer).metadata();
+  const imgW = metadata.width || 1;
+  const imgH = metadata.height || 1;
 
-  // 计算打印尺寸（基于纸张大小）
-  const paperSize = getPaperSizePt(print);
-  const dpi = 300;
-  const paperWidthPx = Math.round(paperSize.width / 72 * dpi);
-  const paperHeightPx = Math.round(paperSize.height / 72 * dpi);
+  const factor = PRINT_DPI / 72; // pt -> px
 
-  // 创建纸张大小的画布
-  const canvas = sharp({
+  // 页面尺寸（pt），考虑方向
+  const paper = getPaperSizePt(print);
+  const pageWpt = print.orientation === 'portrait' ? paper.width : paper.height;
+  const pageHpt = print.orientation === 'portrait' ? paper.height : paper.width;
+
+  const canvasW = Math.round(pageWpt * factor);
+  const canvasH = Math.round(pageHpt * factor);
+
+  // 照片可用区域盒（pt）
+  const marginPt = mmToPt(print.marginMm);
+  const box = getPhotoPrintBox(pageWpt, pageHpt, marginPt, print, imgW >= imgH);
+
+  // 按 fit 模式与缩放比例计算照片绘制尺寸（pt）
+  const imageSize = fitRect(imgW, imgH, box.width, box.height, print.fit);
+  const scale = clamp(print.scalePercent || 100, 50, 150) / 100;
+  imageSize.width *= scale;
+  imageSize.height *= scale;
+
+  // 居中放置（pt，PDF 以左下角为原点，这里转换为左上角原点）
+  const imageXpt = box.x + (box.width - imageSize.width) / 2;
+  const imageYpt = box.y + (box.height - imageSize.height) / 2;
+
+  const drawWpx = Math.max(1, Math.round(imageSize.width * factor));
+  const drawHpx = Math.max(1, Math.round(imageSize.height * factor));
+  const leftPx = Math.round(imageXpt * factor);
+  const topPx = Math.round((pageHpt - (imageYpt + imageSize.height)) * factor);
+
+  // 按目标尺寸缩放照片（fill 允许 adaptive 模式的轻微形变，与 PDF drawImage 一致）
+  const resizedPhoto = await sharp(imageBuffer)
+    .resize(drawWpx, drawHpx, { fit: 'fill' })
+    .toBuffer();
+
+  const composites: sharp.OverlayOptions[] = [];
+
+  // 处理可能超出画布的情况（如 cover 模式），裁剪到可见区域后再合成
+  const clip = clipToCanvas(drawWpx, drawHpx, leftPx, topPx, canvasW, canvasH);
+  if (clip) {
+    const photoInput =
+      clip.srcLeft === 0 && clip.srcTop === 0 && clip.width === drawWpx && clip.height === drawHpx
+        ? resizedPhoto
+        : await sharp(resizedPhoto)
+            .extract({ left: clip.srcLeft, top: clip.srcTop, width: clip.width, height: clip.height })
+            .toBuffer();
+    composites.push({ input: photoInput, left: clip.destLeft, top: clip.destTop });
+  }
+
+  // 水印叠加层（SVG）
+  const watermarkSvg = buildWatermarkSvg(watermark, photo, pageWpt, pageHpt, factor, wmContext);
+  if (watermarkSvg) {
+    composites.push({ input: Buffer.from(watermarkSvg), left: 0, top: 0 });
+  }
+
+  const outputPath = path.join(outputDir, `${photo.id}-print.jpg`);
+
+  await sharp({
     create: {
-      width: print.orientation === 'portrait' ? paperWidthPx : paperHeightPx,
-      height: print.orientation === 'portrait' ? paperHeightPx : paperWidthPx,
+      width: canvasW,
+      height: canvasH,
       channels: 3,
       background: { r: 255, g: 255, b: 255 }
     }
-  });
-
-  // 缩放图片以适应纸张（留边距）
-  const margin = Math.round(print.marginMm / 25.4 * dpi);
-  const maxWidth = (print.orientation === 'portrait' ? paperWidthPx : paperHeightPx) - margin * 2;
-  const maxHeight = (print.orientation === 'portrait' ? paperHeightPx : paperWidthPx) - margin * 2;
-
-  // 计算缩放比例
-  const scale = Math.min(maxWidth / (metadata.width || 1), maxHeight / (metadata.height || 1), 1);
-  const scaledWidth = Math.round((metadata.width || 1) * scale);
-  const scaledHeight = Math.round((metadata.height || 1) * scale);
-
-  // 缩放原图
-  const scaledImage = await image
-    .resize(scaledWidth, scaledHeight, { fit: 'inside' })
-    .toBuffer();
-
-  // 计算居中位置
-  const x = Math.round((print.orientation === 'portrait' ? paperWidthPx : paperHeightPx - scaledWidth) / 2);
-  const y = Math.round((print.orientation === 'portrait' ? paperHeightPx : paperWidthPx - scaledHeight) / 2);
-
-  // 合成图片
-  const outputPath = path.join(outputDir, `${photo.fileName}-print.jpg`);
-
-  // 简化处理：直接输出缩放后的图片
-  await sharp(scaledImage)
-    .flatten({ background: { r: 255, g: 255, b: 255 } })
+  })
+    .composite(composites)
     .jpeg({ quality: 95 })
     .toFile(outputPath);
 
   return outputPath;
+}
+
+// 将一个可能越界的贴图裁剪到画布可见区域
+function clipToCanvas(
+  imgW: number,
+  imgH: number,
+  left: number,
+  top: number,
+  canvasW: number,
+  canvasH: number
+): { srcLeft: number; srcTop: number; width: number; height: number; destLeft: number; destTop: number } | null {
+  const srcLeft = left < 0 ? -left : 0;
+  const srcTop = top < 0 ? -top : 0;
+  const destLeft = Math.max(0, left);
+  const destTop = Math.max(0, top);
+  const width = Math.min(imgW - srcLeft, canvasW - destLeft);
+  const height = Math.min(imgH - srcTop, canvasH - destTop);
+  if (width <= 0 || height <= 0) return null;
+  return { srcLeft, srcTop, width, height, destLeft, destTop };
+}
+
+// 构建水印 SVG 叠加层，坐标与 generatePrintPdf 完全一致（pt -> px）
+function buildWatermarkSvg(
+  watermark: WatermarkSettings,
+  photo: PhotoRecord,
+  pageWpt: number,
+  pageHpt: number,
+  factor: number,
+  ctx: WatermarkRenderContext
+): string | null {
+  const lines = renderWatermarkLines(watermark, photo, ctx.defaultFont, ctx.addressFont);
+  if (lines.length === 0) return null;
+
+  const maxLineWidth = Math.max(...lines.map((line) => line.width));
+  const textHeight = lines.reduce((sum, line) => sum + line.lineHeight, 0);
+  const textPoint = getWatermarkPoint(
+    watermark.position,
+    pageWpt,
+    pageHpt,
+    maxLineWidth,
+    textHeight,
+    mmToPt(watermark.marginMm),
+    watermark.customX,
+    watermark.customY
+  );
+
+  const canvasW = Math.round(pageWpt * factor);
+  const canvasH = Math.round(pageHpt * factor);
+  const parts: string[] = [];
+
+  if (watermark.backgroundEnabled) {
+    const padding = Math.max(4, watermark.fontSize * 0.45);
+    const rectX = textPoint.x - padding;
+    const rectYpt = textPoint.y - padding * 0.7;
+    const rectWpt = maxLineWidth + padding * 2;
+    const rectHpt = textHeight + padding * 1.4;
+    const rectLeft = rectX * factor;
+    const rectTop = (pageHpt - (rectYpt + rectHpt)) * factor;
+    parts.push(
+      `<rect x="${rectLeft.toFixed(2)}" y="${rectTop.toFixed(2)}" width="${(rectWpt * factor).toFixed(2)}" ` +
+        `height="${(rectHpt * factor).toFixed(2)}" fill="rgb(20,28,36)" fill-opacity="0.42" />`
+    );
+  }
+
+  let lineOffset = 0;
+  for (const line of lines) {
+    lineOffset += line.lineHeight;
+    const baselineYpt = textPoint.y + textHeight - lineOffset;
+    const xPx = textPoint.x * factor;
+    const baselinePx = (pageHpt - baselineYpt) * factor;
+    const fontSizePx = line.fontSize * factor;
+    const family = line.font === ctx.addressFont ? ctx.addressFamily : ctx.defaultFamily;
+    const color = `rgb(${Math.round(line.color.r * 255)},${Math.round(line.color.g * 255)},${Math.round(
+      line.color.b * 255
+    )})`;
+    parts.push(
+      `<text x="${xPx.toFixed(2)}" y="${baselinePx.toFixed(2)}" font-family="${family}" ` +
+        `font-size="${fontSizePx.toFixed(2)}" fill="${color}" fill-opacity="${watermark.opacity}" ` +
+        `xml:space="preserve">${escapeXml(line.text)}</text>`
+    );
+  }
+
+  const style = ctx.fontFaceCss ? `<defs><style type="text/css">${ctx.fontFaceCss}</style></defs>` : '';
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasW}" height="${canvasH}" ` +
+    `viewBox="0 0 ${canvasW} ${canvasH}">${style}${parts.join('')}</svg>`
+  );
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// 根据字体家族名推断 SVG 通用字体族，作为回退
+function genericFontFamily(family: string | undefined): string {
+  if (family === 'Courier') return 'monospace';
+  if (family === 'Times Roman') return 'serif';
+  return 'sans-serif';
+}
+
+// 若提供了自定义字体文件，则以 @font-face(base64) 内嵌，保证中文等字形正确渲染
+async function buildFontFace(
+  fontPath: string | null,
+  familyId: string,
+  fallbackFamily: string
+): Promise<{ family: string; css: string }> {
+  if (!fontPath) {
+    return { family: fallbackFamily, css: '' };
+  }
+
+  try {
+    const bytes = await readFile(fontPath);
+    const ext = path.extname(fontPath).toLowerCase();
+    const mime =
+      ext === '.otf' ? 'font/otf' : ext === '.woff' ? 'font/woff' : ext === '.woff2' ? 'font/woff2' : 'font/ttf';
+    const format =
+      ext === '.otf' ? 'opentype' : ext === '.woff' ? 'woff' : ext === '.woff2' ? 'woff2' : 'truetype';
+    const base64 = bytes.toString('base64');
+    const css = `@font-face { font-family: '${familyId}'; src: url(data:${mime};base64,${base64}) format('${format}'); }`;
+    return { family: `'${familyId}', ${fallbackFamily}`, css };
+  } catch {
+    return { family: fallbackFamily, css: '' };
+  }
+}
+
+// 为一次打印任务构建水印渲染上下文（字体测量 + 渲染字体族）
+async function createWatermarkContext(watermark: WatermarkSettings): Promise<WatermarkRenderContext> {
+  const doc = await PDFDocument.create();
+  doc.registerFontkit(fontkit);
+  const defaultFont = await embedWatermarkFont(doc, watermark);
+  const addressFont = await embedWatermarkAddressFont(doc, watermark, defaultFont);
+
+  const defaultFace = await buildFontFace(watermark.fontPath, 'wm-default', genericFontFamily(watermark.fontFamily));
+
+  const addressUsesDefault =
+    !watermark.addressFontPath &&
+    (!watermark.addressFontFamily || watermark.addressFontFamily === watermark.fontFamily);
+  const addressFace = addressUsesDefault
+    ? defaultFace
+    : await buildFontFace(
+        watermark.addressFontPath,
+        'wm-address',
+        genericFontFamily(watermark.addressFontFamily || watermark.fontFamily)
+      );
+
+  const fontFaceCss = [defaultFace.css, addressFace.css === defaultFace.css ? '' : addressFace.css]
+    .filter(Boolean)
+    .join('\n');
+
+  return {
+    defaultFont,
+    addressFont,
+    defaultFamily: defaultFace.family,
+    addressFamily: addressFace.family,
+    fontFaceCss
+  };
 }
 
 // 打印图片文件（使用 Electron 原生打印）
@@ -1342,7 +1550,8 @@ async function printImageFile(
         {
           silent: true,
           printBackground: true,
-          deviceName: printerName
+          deviceName: printerName,
+          copies: Math.max(1, Math.min(99, Math.floor(copies || 1)))
         },
         (success, failureReason) => {
           if (success) {
@@ -1369,7 +1578,7 @@ async function getDefaultPrinterName(): Promise<string | null> {
   if (mainWindow) {
     try {
       const printers = await mainWindow.webContents.getPrintersAsync();
-      const defaultPrinter = printers.find(p => p.isDefault);
+      const defaultPrinter = printers.find((p) => (p as { isDefault?: boolean }).isDefault);
       if (defaultPrinter) {
         return defaultPrinter.name;
       }
