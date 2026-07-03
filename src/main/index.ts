@@ -1132,13 +1132,18 @@ async function printPdf(pdfPath: string, print: PrintSettings): Promise<void> {
 
   if (process.platform === 'win32') {
     try {
-      const powershellCmd = [
-        '$p = Get-Item -LiteralPath', escapePowerShellPath(pdfPath),
-        '; Start-Process -FilePath $p.FullName -Verb Print',
-        `-ArgumentList '\\"${printerName}\\"'`
-      ].join(' ');
+      // 使用 PrintTo 谓词把 PDF 打到指定打印机（Print 谓词只会用默认打印机，
+      // 指定的打印机名会被忽略）。通过 -EncodedCommand 传递脚本，避免打印机名
+      // 含空格/引号时的多层转义问题。
+      const psScript = [
+        "$ErrorActionPreference = 'Stop'",
+        `Start-Process -FilePath ${escapePowerShellPath(pdfPath)} -Verb PrintTo -ArgumentList ${escapePowerShellPath(
+          printerName
+        )}`
+      ].join('; ');
+      const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
 
-      await execAsync(`powershell -NoProfile -Command "${powershellCmd}"`, {
+      await execAsync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
         timeout: 30000
       });
       return;
@@ -1575,21 +1580,24 @@ function escapePowerShellPath(filePath: string): string {
 
 async function getDefaultPrinterName(): Promise<string | null> {
   // 使用 Electron 的 API 获取默认打印机
-  if (mainWindow) {
-    try {
-      const printers = await mainWindow.webContents.getPrintersAsync();
-      const defaultPrinter = printers.find((p) => (p as { isDefault?: boolean }).isDefault);
-      if (defaultPrinter) {
-        return defaultPrinter.name;
-      }
-      // 如果没有标记默认，返回第一个打印机
-      if (printers.length > 0) {
-        return printers[0].name;
-      }
-    } catch (error) {
-      console.error('Failed to get printers:', error);
-    }
+  if (!mainWindow) return null;
+
+  try {
+    const printers = await mainWindow.webContents.getPrintersAsync();
+    // 与 listPrinters 保持一致：仅在实体打印机中挑选，避免默认落到
+    // "Microsoft Print to PDF" 等 UI 列表里被隐藏的虚拟打印机上
+    const physical = printers.filter((p) => !isVirtualPrinter(p.name));
+
+    const defaultPhysical = physical.find((p) => (p as { isDefault?: boolean }).isDefault);
+    if (defaultPhysical) return defaultPhysical.name;
+
+    // 没有标记默认时，返回第一个实体打印机
+    if (physical.length > 0) return physical[0].name;
+  } catch (error) {
+    console.error('Failed to get printers:', error);
   }
+
+  // 没有可用实体打印机：返回 null，让调用方提示用户选择打印机
   return null;
 }
 
@@ -1662,30 +1670,30 @@ function getSystemFontDirs(): string[] {
   ];
 }
 
+// 虚拟打印机关键词列表（PDF、XPS、OneNote、Fax 等）
+const VIRTUAL_PRINTER_PATTERNS = [
+  /pdf/i,
+  /xps/i,
+  /onenote/i,
+  /fax/i,
+  /microsoft print to pdf/i,
+  /导出为/i,
+  /虚拟/i,
+  /virtual/i,
+  /microsoft xps/i
+];
+
+function isVirtualPrinter(name: string): boolean {
+  return VIRTUAL_PRINTER_PATTERNS.some((pattern) => pattern.test(name));
+}
+
 async function listPrinters(): Promise<PrinterSummary[]> {
   if (!mainWindow) return [];
 
   const printers = await mainWindow.webContents.getPrintersAsync();
 
-  // 虚拟打印机关键词列表（PDF、XPS、OneNote、Fax 等）
-  const virtualPrinterPatterns = [
-    /pdf/i,
-    /xps/i,
-    /onenote/i,
-    /fax/i,
-    /microsoft print to pdf/i,
-    /导出为/i,
-    /虚拟/i,
-    /virtual/i,
-    /microsoft xps/i
-  ];
-
-  const isVirtualPrinter = (name: string): boolean => {
-    return virtualPrinterPatterns.some(pattern => pattern.test(name));
-  };
-
   return printers
-    .filter(printer => !isVirtualPrinter(printer.name))
+    .filter((printer) => !isVirtualPrinter(printer.name))
     .map((printer) => {
       const printerInfo = printer as typeof printer & { status?: number; isDefault?: boolean };
       return {
