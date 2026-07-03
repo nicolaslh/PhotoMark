@@ -18,6 +18,7 @@ import {
   Type
 } from 'lucide-react';
 import type { FontOption, GeocodeSettings, PhotoRecord, PrintSettings, WatermarkSettings } from '../shared/types';
+import { BUNDLED_CJK_FONT_FAMILY } from '../shared/types';
 import './styles.css';
 import type { ImportProgressEvent, PrinterSummary } from '../shared/types';
 
@@ -126,7 +127,27 @@ function App(): JSX.Element {
   }, [photos, selectedId]);
 
   useEffect(() => {
-    window.photoPrint.listFonts().then(setFonts).catch(() => undefined);
+    window.photoPrint
+      .listFonts()
+      .then((list) => {
+        setFonts(list);
+        // 启动后把内置中文字体设为默认（仅当用户尚未改动过字体时）
+        const bundled = list.find((font) => font.family === BUNDLED_CJK_FONT_FAMILY && font.path);
+        if (bundled) {
+          setWatermark((current) => {
+            const isInitial = current.fontPath === null && current.fontFamily === 'Helvetica';
+            if (!isInitial) return current;
+            return {
+              ...current,
+              fontFamily: bundled.family,
+              fontPath: bundled.path,
+              addressFontFamily: bundled.family,
+              addressFontPath: bundled.path
+            };
+          });
+        }
+      })
+      .catch(() => undefined);
     refreshPrinters();
     const removeBatchProgress = window.photoPrint.onBatchProgress((event) => {
       setQueue((current) =>

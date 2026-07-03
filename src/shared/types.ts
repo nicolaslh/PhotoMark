@@ -137,3 +137,7 @@ export type PrintResult = {
   pdfPath: string;
   failures: PrintFailure[];
 };
+
+// 随应用内置的中文字体（用于默认水印，保证中文可渲染/可导出 PDF）
+export const BUNDLED_CJK_FONT_FILE = 'ShanHaiJiangNanLi45W-2.ttf';
+export const BUNDLED_CJK_FONT_FAMILY = '山海江南隶 (内置中文)';

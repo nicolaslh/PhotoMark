@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import sharp from 'sharp';
+import { BUNDLED_CJK_FONT_FAMILY, BUNDLED_CJK_FONT_FILE } from '../shared/types';
 import type {
   BatchProgressEvent,
   FontOption,
@@ -1580,6 +1581,11 @@ async function buildFontFace(
 
   try {
     const bytes = await readFile(fontPath);
+    // 字体过大（如整套 CJK 字体）时不内联进 SVG，避免每页 SVG 膨胀到数 MB 拖慢渲染；
+    // 此时 SVG 用系统同类字体渲染中文（PDF 导出与宽度测量仍使用真实字体）。
+    if (bytes.length > 2 * 1024 * 1024) {
+      return { family: fallbackFamily, css: '' };
+    }
     const ext = path.extname(fontPath).toLowerCase();
     const mime =
       ext === '.otf' ? 'font/otf' : ext === '.woff' ? 'font/woff' : ext === '.woff2' ? 'font/woff2' : 'font/ttf';
@@ -1681,6 +1687,14 @@ function pickPdfFont(fontFamily: string) {
   return StandardFonts.Helvetica;
 }
 
+// 内置中文字体在运行时的绝对路径（开发态取项目 resources 目录，打包态取 app resources）
+function getBundledFontPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'fonts', BUNDLED_CJK_FONT_FILE);
+  }
+  return path.join(__dirname, '../../resources/fonts', BUNDLED_CJK_FONT_FILE);
+}
+
 async function listFonts(): Promise<FontOption[]> {
   const fontDirs = getSystemFontDirs();
   const systemFonts = await Promise.all(fontDirs.map((dir) => scanFontDir(dir)));
@@ -1691,10 +1705,21 @@ async function listFonts(): Promise<FontOption[]> {
     if (!unique.has(font.id)) unique.set(font.id, font);
   }
 
-  return [...unique.values()].sort((a, b) => {
+  const others = [...unique.values()].sort((a, b) => {
     if (a.source !== b.source) return a.source === 'standard' ? -1 : 1;
     return a.family.localeCompare(b.family, 'zh-Hans-CN');
   });
+
+  // 内置中文字体置顶，作为默认可选项（id 用 system:<path> 以便与选择逻辑一致）
+  const bundledPath = getBundledFontPath();
+  const bundledFont: FontOption = {
+    id: `system:${bundledPath}`,
+    family: BUNDLED_CJK_FONT_FAMILY,
+    path: bundledPath,
+    source: 'system'
+  };
+
+  return [bundledFont, ...others];
 }
 
 function getSystemFontDirs(): string[] {
@@ -2002,11 +2027,30 @@ function renderWatermarkLines(
         font,
         fontSize,
         lineHeight: fontSize * 1.22,
-        width: font.widthOfTextAtSize(text, fontSize),
+        width: measureTextWidth(font, text, fontSize),
         color
       };
     })
     .filter((line) => line.text.trim());
+}
+
+// 安全测量文本宽度：标准 WinAnsi 字体遇到中文等字符会抛错，
+// 此时退化为按字符估算（宽字符约 1em，其余约 0.5em），仅用于水印定位。
+function measureTextWidth(font: EmbeddedWatermarkFont, text: string, size: number): number {
+  try {
+    return font.widthOfTextAtSize(text, size);
+  } catch {
+    return estimateTextWidth(text, size);
+  }
+}
+
+function estimateTextWidth(text: string, size: number): number {
+  let width = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    width += code > 0x2e7f ? size : size * 0.5;
+  }
+  return width;
 }
 
 function formatDate(value: string): string {
