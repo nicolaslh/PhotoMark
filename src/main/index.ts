@@ -219,17 +219,25 @@ ipcMain.handle(
     payload: { photos: PhotoRecord[]; watermark: WatermarkSettings; print: PrintSettings; jobId: string }
   ) => {
     try {
-      // 最稳的路径：合成整页图片后拼成 HTML 文档，通过系统打印对话框整批打印。
-      // 注意：Electron 的 webContents.print 无法打印其内置 PDF 阅读器（属 Chromium
-      // 扩展），因此这里用 HTML+图片而非 PDF。
-      const result = await printPhotosViaHtml(
+      // 最稳的“用系统打印设置”路径：生成多页 PDF（矢量、页面物理尺寸精确、默认内置
+      // 中文字体），再用系统默认程序打开。用户在系统 PDF 阅读器里用完整的系统打印
+      // 设置与打印机驱动打印。这样完全绕开 Electron webContents.print 在部分 Windows
+      // 上弹不出对话框/报 "Invalid printer settings" 的问题。
+      const result = await generatePrintPdf(
         payload.photos,
         payload.watermark,
         payload.print,
         payload.jobId,
-        false,
         (progress) => event.sender.send('batch:progress', progress)
       );
+
+      if (result.pdfPath && !canceledJobs.has(payload.jobId)) {
+        const openError = await shell.openPath(result.pdfPath);
+        if (openError) {
+          throw new Error(`无法打开 PDF 进行打印：${openError}`);
+        }
+      }
+
       return result;
     } finally {
       canceledJobs.delete(payload.jobId);
@@ -247,23 +255,12 @@ ipcMain.handle('print:calibration-pdf', async (_event, payload: { print: PrintSe
 });
 
 ipcMain.handle('print:calibration-start', async (_event, payload: { print: PrintSettings }) => {
-  // 用 HTML（毫米精确的方框）通过系统打印对话框打印，避免打印 PDF 的限制
-  const dir = path.join(os.tmpdir(), 'photomark-print', `calibration-${Date.now()}`);
-  await mkdir(dir, { recursive: true });
-  try {
-    const htmlPath = path.join(dir, 'calibration.html');
-    await writeFile(htmlPath, buildCalibrationHtml(payload.print), 'utf-8');
-    await printHtmlFile(htmlPath, payload.print, {
-      silent: false,
-      deviceName: payload.print.printerName,
-      copies: 1
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  }
-
-  // 仍生成一份校准 PDF，便于用户留存/打开
+  // 生成校准 PDF 并用系统默认程序打开，由用户在系统打印设置中打印（务必选“实际大小/100%”）
   const pdfPath = await generateCalibrationPdf(payload.print);
+  const openError = await shell.openPath(pdfPath);
+  if (openError) {
+    throw new Error(`无法打开校准 PDF：${openError}`);
+  }
   return { pdfPath, failures: [] };
 });
 
@@ -1182,9 +1179,6 @@ async function printHtmlFile(
   print: PrintSettings,
   options: { silent: boolean; deviceName?: string | null; copies: number }
 ): Promise<void> {
-  const { pageWpt, pageHpt } = getPagePt(print);
-  const ptToMicron = 25400 / 72;
-
   const win = new BrowserWindow({
     show: false,
     // macOS 上系统打印面板需要依附父窗口
@@ -1198,30 +1192,43 @@ async function printHtmlFile(
     await win.loadFile(htmlPath);
     await waitForContentReady(win);
 
-    await new Promise<void>((resolve, reject) => {
-      win.webContents.print(
-        {
-          silent: options.silent,
-          printBackground: true,
-          deviceName: options.deviceName || undefined,
-          copies: Math.max(1, Math.min(99, Math.floor(options.copies || 1))),
-          margins: { marginType: 'none' },
-          landscape: false,
-          pageSize: {
-            width: Math.round(pageWpt * ptToMicron),
-            height: Math.round(pageHpt * ptToMicron)
-          }
-        },
-        (success, failureReason) => {
-          const reason = (failureReason || '').toLowerCase();
-          // 用户在系统对话框中取消不视为错误
-          if (success || reason.includes('cancel')) {
-            resolve();
-          } else {
-            reject(new Error(`打印失败：${failureReason || '已取消'}`));
-          }
+    // 弹系统对话框时只传最小参数：打印机/纸张/份数/边距都交给用户在对话框中选择。
+    // 传入自定义 pageSize、deviceName 等在部分打印驱动上会直接报 "Invalid printer settings"。
+    // 页面物理尺寸由 HTML 的 @page CSS 控制。
+    // 静默直打没有对话框，必须显式指定打印机与纸张/边距。
+    let printOptions: Parameters<typeof win.webContents.print>[0];
+    if (options.silent) {
+      const { pageWpt, pageHpt } = getPagePt(print);
+      const ptToMicron = 25400 / 72;
+      printOptions = {
+        silent: true,
+        printBackground: true,
+        deviceName: options.deviceName || undefined,
+        copies: Math.max(1, Math.min(99, Math.floor(options.copies || 1))),
+        margins: { marginType: 'none' },
+        landscape: false,
+        pageSize: {
+          width: Math.round(pageWpt * ptToMicron),
+          height: Math.round(pageHpt * ptToMicron)
         }
-      );
+      };
+    } else {
+      printOptions = {
+        silent: false,
+        printBackground: true
+      };
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      win.webContents.print(printOptions, (success, failureReason) => {
+        const reason = (failureReason || '').toLowerCase();
+        // 用户在系统对话框中取消不视为错误
+        if (success || reason.includes('cancel')) {
+          resolve();
+        } else {
+          reject(new Error(`打印失败：${failureReason || '已取消'}`));
+        }
+      });
     });
   } finally {
     if (!win.isDestroyed()) {
@@ -1245,28 +1252,6 @@ function buildPhotoPageHtml(imageFileNames: string[], print: PrintSettings): str
   .page:last-child { page-break-after: auto; }
   .page img { display: block; width: 100%; height: 100%; object-fit: fill; }
   </style></head><body>${pages}</body></html>`;
-}
-
-// 校准页：毫米精确的 100mm 方框
-function buildCalibrationHtml(print: PrintSettings): string {
-  const { pageWpt, pageHpt } = getPagePt(print);
-  const wmm = (pageWpt / 72) * 25.4;
-  const hmm = (pageHpt / 72) * 25.4;
-  const marginMm = Math.max(0, print.marginMm || 0);
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-  @page { size: ${wmm}mm ${hmm}mm; margin: 0; }
-  html, body { margin: 0; padding: 0; }
-  .wrap { box-sizing: border-box; padding: ${marginMm}mm; font-family: -apple-system, "Segoe UI", sans-serif; }
-  .title { font-size: 14px; color: #1a2128; margin: 0 0 3mm; }
-  .box { width: 100mm; height: 100mm; border: 0.4mm solid #1f7070; box-sizing: border-box; }
-  .cap { font-size: 11px; color: #4d5a66; margin-top: 3mm; }
-  </style></head><body>
-  <div class="wrap">
-    <p class="title">PhotoMark print calibration</p>
-    <div class="box"></div>
-    <p class="cap">测量此方框：应为 100mm × 100mm。若不足或超出，请调整尺寸校准百分比。</p>
-  </div>
-  </body></html>`;
 }
 
 // 合成整页图片并以 HTML 文档打印（silent=true 静默；silent=false 弹系统对话框）

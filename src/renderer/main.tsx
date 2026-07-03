@@ -279,7 +279,7 @@ function App(): JSX.Element {
       mode === 'pdf'
         ? '正在生成打印 PDF'
         : mode === 'system'
-          ? '正在生成 PDF 并调用系统打印'
+          ? '正在生成 PDF 并打开系统打印'
           : '正在静默直接打印'
     );
     setBusyDetail(`${targetPhotos.length} 张照片等待处理`);
@@ -295,7 +295,7 @@ function App(): JSX.Element {
 
       const successDetail =
         mode === 'system'
-          ? '已在系统打印对话框中提交，请按系统提示确认'
+          ? '已生成 PDF 并用系统程序打开，请在其中选择打印机并打印'
           : mode === 'pdf'
             ? `PDF 已生成：${result.pdfPath}`
             : '已发送到打印机';
@@ -325,7 +325,7 @@ function App(): JSX.Element {
           setBusyLabel('任务已取消');
           setBusyDetail(`${canceledCount} 张照片未打印`);
         } else {
-          setBusyLabel(mode === 'system' ? '已提交系统打印' : '批量任务完成');
+          setBusyLabel(mode === 'system' ? '已打开 PDF，请在打开的程序中打印' : '批量任务完成');
           setBusyDetail(successDetail);
         }
       }
@@ -947,12 +947,12 @@ function App(): JSX.Element {
               checked={useSystemDialog}
               onChange={(event) => setUseSystemDialog(event.target.checked)}
             />
-            打印前弹出系统打印设置（推荐）
+            用系统打印设置打印（推荐）
           </label>
           <p className="hint">
             {useSystemDialog
-              ? '将整批照片生成一份 PDF 后调用系统打印对话框，可在系统中选择打印机与参数，尺寸最准确。'
-              : '直接静默打印到所选打印机，不弹出系统设置。'}
+              ? '将整批照片生成一份 PDF 并用系统默认程序打开，在其中选择打印机与参数打印，尺寸最准确、最稳定。'
+              : '直接静默打印到所选打印机，不弹出系统设置（部分打印机可能不兼容）。'}
           </p>
           <div className="button-row">
             <button className="text-button" onClick={refreshPrinters}>
