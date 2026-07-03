@@ -1312,7 +1312,7 @@ async function printPhotosViaHtml(
       });
 
       try {
-        const imagePath = await generatePrintImage(photo, watermark, print, dir, wmContext);
+        const imagePath = await generatePrintImage(photo, watermark, print, dir, wmContext, `page-${index + 1}`);
         generated.push(path.basename(imagePath));
         onProgress?.({
           jobId,
@@ -1387,7 +1387,8 @@ async function generatePrintImage(
   watermark: WatermarkSettings,
   print: PrintSettings,
   outputDir: string,
-  wmContext: WatermarkRenderContext
+  wmContext: WatermarkRenderContext,
+  outputBaseName: string
 ): Promise<string> {
   // 读取原图并处理（旋转/裁剪/亮度已在此应用）
   const imageBuffer = await createJpegBuffer(photo.path, undefined, photo.adjustments);
@@ -1449,7 +1450,8 @@ async function generatePrintImage(
     composites.push({ input: Buffer.from(watermarkSvg), left: 0, top: 0 });
   }
 
-  const outputPath = path.join(outputDir, `${photo.id}-print.jpg`);
+  // 使用调用方提供的安全短名（photo.id 可能包含盘符/路径分隔符等非法文件名字符）
+  const outputPath = path.join(outputDir, `${outputBaseName}.jpg`);
 
   await sharp({
     create: {
