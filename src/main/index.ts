@@ -1228,7 +1228,7 @@ async function printImagesDirect(
       const printImagePath = await generatePrintImage(photo, watermark, print, dir);
 
       // 打印图片
-      await printImageFile(printImagePath, printerName, print.copies);
+      await printImageFile(printImagePath, printerName, print.copies, print);
 
       onProgress?.({
         jobId,
@@ -1317,28 +1317,46 @@ async function generatePrintImage(
   return outputPath;
 }
 
-// 打印图片文件
-async function printImageFile(imagePath: string, printerName: string, copies: number): Promise<void> {
-  if (process.platform === 'win32') {
-    // 使用 Windows 图片查看器的打印功能（shimgvw.dll）
-    // 这是 Windows 原生支持的图片打印方式
-    const escapedPath = imagePath.replace(/"/g, '""');
-    const escapedPrinter = printerName.replace(/"/g, '""');
-    
-    // rundll32 shimgvw.dll,ImageView_PrintTo /pt "文件路径" "打印机名称"
-    const cmd = `rundll32.exe C:\\Windows\\System32\\shimgvw.dll,ImageView_PrintTo /pt "${escapedPath}" "${escapedPrinter}"`;
-    
-    await execAsync(cmd, {
-      timeout: 60000
-    });
+// 打印图片文件（使用 Electron 原生打印）
+async function printImageFile(
+  imagePath: string, 
+  printerName: string, 
+  copies: number,
+  print: PrintSettings
+): Promise<void> {
+  // 创建隐藏窗口加载图片
+  const printWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      sandbox: false
+    }
+  });
 
-    // 等待打印任务发送到打印机
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  } else {
-    // macOS/Linux 使用 lp 命令
-    await execAsync(`lp -d "${printerName}" -n ${copies} "${imagePath}"`, {
-      timeout: 60000
+  try {
+    // 加载图片文件
+    await printWindow.loadURL(pathToFileURL(imagePath).toString());
+
+    // 使用 Electron 打印 API（静默打印）
+    await new Promise<void>((resolve, reject) => {
+      printWindow.webContents.print(
+        {
+          silent: true,
+          printBackground: true,
+          deviceName: printerName
+        },
+        (success, failureReason) => {
+          if (success) {
+            resolve();
+          } else {
+            reject(new Error(`打印失败：${failureReason || '已取消'}`));
+          }
+        }
+      );
     });
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close();
+    }
   }
 }
 
